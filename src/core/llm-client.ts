@@ -8,6 +8,11 @@
  * - Multi-tier model selection
  */
 
+import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
+import { encoding_for_model, get_encoding, TiktokenModel } from 'tiktoken';
+import { createLogger } from '../../shared/src/core/structured-logger.js';
+
 export interface ModelPricing {
   /** USD per 1M input tokens. */
   input: number;
@@ -75,7 +80,7 @@ export function estimateCostUsd(
 ): number {
   const pricing = MODEL_PRICING[modelId];
   if (!pricing) {
-    console.warn(`[LLMClient] No pricing for model: ${modelId}`);
+    console.warn(\[LLMClient] No pricing for model: \\);
     return 0;
   }
   return (
@@ -92,12 +97,28 @@ export function getModelPricing(modelId: string): ModelPricing | null {
 }
 
 /**
- * Simple token counter (approximate)
- * In production, use provider-specific tokenizers
+ * Enhanced token counter using tiktoken with fallback
  */
-export function estimateTokens(text: string): number {
-  // Rough approximation: ~4 characters per token
-  return Math.ceil(text.length / 4);
+export function estimateTokens(text: string, modelId?: string): number {
+  if (!text) return 0;
+  
+  try {
+    let encoder;
+    try {
+      // Try to get model-specific encoding
+      encoder = encoding_for_model((modelId || 'gpt-4o') as TiktokenModel);
+    } catch (e) {
+      // Fallback to cl100k_base (used by GPT-4 and recent models)
+      encoder = get_encoding('cl100k_base');
+    }
+    
+    const tokens = encoder.encode(text).length;
+    encoder.free();
+    return tokens;
+  } catch (e) {
+    // Final fallback: ~4 characters per token
+    return Math.ceil(text.length / 4);
+  }
 }
 
 /**
@@ -108,6 +129,9 @@ export class LLMClient {
   private totalCostUsd: number = 0;
   private totalTokens: number = 0;
   private callCount: number = 0;
+  private anthropicClient?: Anthropic;
+  private openaiClient?: OpenAI;
+  private logger = createLogger('gorchestrator');
 
   constructor(config: LLMClientConfig = {}) {
     this.config = {
@@ -116,13 +140,22 @@ export class LLMClient {
       timeoutMs: 30000,
       ...config,
     };
+
+    if (this.config.anthropicApiKey) {
+      this.anthropicClient = new Anthropic({
+        apiKey: this.config.anthropicApiKey,
+      });
+    }
+
+    if (this.config.openaiApiKey) {
+      this.openaiClient = new OpenAI({
+        apiKey: this.config.openaiApiKey,
+      });
+    }
   }
 
   /**
    * Call an LLM with the given prompt
-   * 
-   * Note: This is a simplified implementation.
-   * In production, use actual Anthropic/OpenAI SDKs.
    */
   async call(
     prompt: string,
@@ -137,13 +170,25 @@ export class LLMClient {
     const startTime = Date.now();
 
     // Estimate input tokens
-    const inputTokens = estimateTokens(prompt);
+    const inputTokens = estimateTokens(prompt, model);
 
-    // In production, this would make an actual API call
-    // For now, simulate the response
-    const simulatedResponse = await this.simulateLLMCall(prompt, model, options.temperature);
+    let content = '';
+    let outputTokens = 0;
 
-    const outputTokens = estimateTokens(simulatedResponse);
+    if (model.startsWith('claude')) {
+      const result = await this.callAnthropic(prompt, model, options);
+      content = result.content;
+      outputTokens = result.outputTokens;
+    } else if (model.includes('gpt')) {
+      const result = await this.callOpenAI(prompt, model, options);
+      content = result.content;
+      outputTokens = result.outputTokens;
+    } else {
+      // Fallback to legacy simulation if no real call possible
+      content = await this.simulateLLMCall(prompt, model, options.temperature);
+      outputTokens = estimateTokens(content, model);
+    }
+
     const latency = Date.now() - startTime;
     const cost = estimateCostUsd(model, inputTokens, outputTokens);
 
@@ -153,7 +198,7 @@ export class LLMClient {
     this.callCount++;
 
     return {
-      content: simulatedResponse,
+      content,
       input_tokens: inputTokens,
       output_tokens: outputTokens,
       model_id: model,
@@ -163,21 +208,68 @@ export class LLMClient {
   }
 
   /**
-   * Simulate an LLM call (placeholder for production implementation)
-   * 
-   * TODO: Replace with actual Anthropic/OpenAI SDK calls
+   * Real call to Anthropic SDK
+   */
+  private async callAnthropic(
+    prompt: string,
+    model: string,
+    options: any
+  ): Promise<{ content: string; outputTokens: number }> {
+    if (!this.anthropicClient) {
+      throw new Error('Anthropic API key not provided');
+    }
+
+    const response = await this.anthropicClient.messages.create({
+      model: model,
+      max_tokens: options.maxTokens || this.config.maxTokens || 4096,
+      temperature: options.temperature,
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    const content = response.content[0].type === 'text' ? response.content[0].text : '';
+    return {
+      content,
+      outputTokens: response.usage.output_tokens,
+    };
+  }
+
+  /**
+   * Real call to OpenAI SDK
+   */
+  private async callOpenAI(
+    prompt: string,
+    model: string,
+    options: any
+  ): Promise<{ content: string; outputTokens: number }> {
+    if (!this.openaiClient) {
+      throw new Error('OpenAI API key not provided');
+    }
+
+    const response = await this.openaiClient.chat.completions.create({
+      model: model,
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: options.maxTokens || this.config.maxTokens || 4096,
+      temperature: options.temperature,
+    });
+
+    return {
+      content: response.choices[0].message.content || '',
+      outputTokens: response.usage?.completion_tokens || 0,
+    };
+  }
+
+  /**
+   * Simulate an LLM call (fallback)
    */
   private async simulateLLMCall(
     prompt: string,
     model: string,
     temperature?: number
   ): Promise<string> {
-    // Simulate network latency
     const pricing = MODEL_PRICING[model];
     const latency = pricing?.avg_latency_ms || 1000;
     await new Promise(resolve => setTimeout(resolve, latency / 10));
 
-    // Generate a simulated response based on prompt keywords
     if (prompt.toLowerCase().includes('plan') || prompt.toLowerCase().includes('decompose')) {
       return JSON.stringify([
         'Analyze task requirements',
@@ -208,39 +300,24 @@ export class LLMClient {
     });
   }
 
-  /**
-   * Get total cost incurred
-   */
   getTotalCostUsd(): number {
     return this.totalCostUsd;
   }
 
-  /**
-   * Get total tokens used
-   */
   getTotalTokens(): number {
     return this.totalTokens;
   }
 
-  /**
-   * Get call count
-   */
   getCallCount(): number {
     return this.callCount;
   }
 
-  /**
-   * Reset metrics
-   */
   resetMetrics(): void {
     this.totalCostUsd = 0;
     this.totalTokens = 0;
     this.callCount = 0;
   }
 
-  /**
-   * Get model by tier
-   */
   getModelByTier(tier: 'tier1' | 'tier2' | 'tier3'): string {
     return MODEL_TIERS[tier];
   }
