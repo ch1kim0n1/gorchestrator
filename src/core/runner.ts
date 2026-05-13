@@ -9,10 +9,14 @@ import {
   CostBreakdown,
 } from '../types/index.js';
 import { SandboxPoolManager } from './sandbox.js';
+import {
+  LLMClient,
+  LLMClientConfig,
+} from './llm-client.js';
 
 /**
  * Attempt Runner
- * 
+ *
  * Responsibilities:
  * - Run a single agent configuration against a task in a sandbox
  * - Invoke GStack skills as needed
@@ -24,15 +28,18 @@ export class AttemptRunner {
   private sandboxManager: SandboxPoolManager;
   private gstackEndpoint: string;
   private maxWallTimeMs: number;
+  private llmClient: LLMClient;
 
   constructor(config: {
     sandboxManager: SandboxPoolManager;
     gstackEndpoint?: string;
     maxWallTimeMs?: number;
+    llmConfig?: LLMClientConfig;
   }) {
     this.sandboxManager = config.sandboxManager;
     this.gstackEndpoint = config.gstackEndpoint || 'http://localhost:3001';
     this.maxWallTimeMs = config.maxWallTimeMs || 300000;
+    this.llmClient = new LLMClient(config.llmConfig);
   }
 
   /**
@@ -68,11 +75,19 @@ export class AttemptRunner {
         (event) => {
           traceEvents.push(event);
           totalCost += event.cost_usd || 0;
+          if (event.data?.input_tokens) {
+            totalTokens += event.data.input_tokens + (event.data.output_tokens || 0);
+          }
         }
       );
 
       const endTime = Date.now();
       const wallTimeMs = endTime - startTime;
+
+      // Get actual LLM costs from client
+      const llmCost = this.llmClient.getTotalCostUsd();
+      const llmTokens = this.llmClient.getTotalTokens();
+      const llmCalls = this.llmClient.getCallCount();
 
       return {
         attempt_id: attemptId,
@@ -84,14 +99,16 @@ export class AttemptRunner {
         trace: {
           events: traceEvents,
           total_cost_usd: totalCost,
-          total_tokens: totalTokens,
+          total_tokens: llmTokens,
           total_wall_time_ms: wallTimeMs,
         },
         cost: {
-          model_cost_usd: totalCost * 0.8,
+          model_cost_usd: llmCost * 0.8,
           tool_cost_usd: totalCost * 0.1,
           sandbox_cost_usd: totalCost * 0.1,
           total_cost_usd: totalCost,
+          tokens_used: llmTokens,
+          llm_calls: llmCalls,
         },
         wall_time_ms: wallTimeMs,
         started_at: new Date(startTime).toISOString(),
@@ -168,8 +185,49 @@ export class AttemptRunner {
     sandboxId: string,
     onTrace: (event: TraceEvent) => void
   ): Promise<string[]> {
-    // In production, call LLM to generate plan
-    // For MVP, return a simple decomposition
+    const prompt = this.buildPlanPrompt(taskBundle, config);
+    const model = this.llmClient.getModelByTier('tier1');
+    
+    const llmResult = await this.llmClient.call(prompt, { model, temperature: 0.7 });
+    
+    onTrace({
+      timestamp: new Date().toISOString(),
+      event_type: 'model_call',
+      data: { task: taskBundle.task_id, model, input_tokens: llmResult.input_tokens, output_tokens: llmResult.output_tokens },
+      cost_usd: llmResult.cost_usd,
+    });
+
+    // Parse the LLM response to extract plan steps
+    return this.parsePlanResponse(llmResult.content);
+  }
+
+  /**
+   * Build prompt for plan generation
+   */
+  private buildPlanPrompt(taskBundle: TaskBundle, config: AgentConfig): string {
+    return `You are an AI task planner. Given the following task, decompose it into a sequence of high-level steps.
+
+Task: ${taskBundle.raw_description}
+Task Type: ${taskBundle.signature.task_type}
+Reasoning Style: ${config.reasoning_style}
+
+Return a JSON array of step descriptions, e.g.:
+["Analyze requirements", "Design solution", "Implement code", "Test implementation", "Document results"]`;
+  }
+
+  /**
+   * Parse plan response from LLM
+   */
+  private parsePlanResponse(content: string): string[] {
+    try {
+      const parsed = JSON.parse(content);
+      if (Array.isArray(parsed)) {
+        return parsed.map(step => String(step));
+      }
+    } catch (e) {
+      // If JSON parsing fails, return a default plan
+      console.warn('[AttemptRunner] Failed to parse plan response, using default');
+    }
     return [
       'Analyze task requirements',
       'Implement solution',
@@ -435,16 +493,49 @@ export class AttemptRunner {
     sandboxId: string,
     onTrace: (event: TraceEvent) => void
   ): Promise<string> {
-    // In production, invoke GStack skills or LLM
-    // For MVP, return a simulated result
+    const prompt = this.buildSubtaskPrompt(subtask, config);
+    const model = this.llmClient.getModelByTier('tier1');
+    
+    const llmResult = await this.llmClient.call(prompt, { model, temperature: 0.5 });
+    
     onTrace({
       timestamp: new Date().toISOString(),
       event_type: 'model_call',
-      data: { subtask, model: config.base_model },
-      cost_usd: 0.001,
+      data: { subtask, model, input_tokens: llmResult.input_tokens, output_tokens: llmResult.output_tokens },
+      cost_usd: llmResult.cost_usd,
     });
 
-    return `[Executed: ${subtask} with ${config.base_model}]`;
+    // Parse the LLM response
+    return this.parseSubtaskResponse(llmResult.content, subtask);
+  }
+
+  /**
+   * Build prompt for subtask execution
+   */
+  private buildSubtaskPrompt(subtask: string, config: AgentConfig): string {
+    return `You are an AI task executor. Execute the following sub-task and return the result.
+
+Sub-task: ${subtask}
+Model: ${config.base_model}
+
+Return a JSON object with the result, e.g.:
+{"result": "Execution output", "confidence": 0.9}`;
+  }
+
+  /**
+   * Parse subtask response from LLM
+   */
+  private parseSubtaskResponse(content: string, subtask: string): string {
+    try {
+      const parsed = JSON.parse(content);
+      if (parsed.result) {
+        return String(parsed.result);
+      }
+    } catch (e) {
+      // If JSON parsing fails, return a default response
+      console.warn('[AttemptRunner] Failed to parse subtask response, using default');
+    }
+    return `[Executed: ${subtask}]`;
   }
 
   /**
@@ -456,7 +547,51 @@ export class AttemptRunner {
     sandboxId: string,
     onTrace: (event: TraceEvent) => void
   ): Promise<Array<{ description: string; artifact_path?: string }>> {
-    // In production, use LLM
+    const prompt = this.buildDetailedPlanPrompt(taskBundle, config);
+    const model = this.llmClient.getModelByTier('tier1');
+    
+    const llmResult = await this.llmClient.call(prompt, { model, temperature: 0.7 });
+    
+    onTrace({
+      timestamp: new Date().toISOString(),
+      event_type: 'model_call',
+      data: { task: taskBundle.task_id, model, input_tokens: llmResult.input_tokens, output_tokens: llmResult.output_tokens },
+      cost_usd: llmResult.cost_usd,
+    });
+
+    // Parse the LLM response to extract detailed plan steps
+    return this.parseDetailedPlanResponse(llmResult.content);
+  }
+
+  /**
+   * Build prompt for detailed plan generation
+   */
+  private buildDetailedPlanPrompt(taskBundle: TaskBundle, config: AgentConfig): string {
+    return `You are an AI task planner. Given the following task, decompose it into a detailed sequence of steps with artifact paths.
+
+Task: ${taskBundle.raw_description}
+Task Type: ${taskBundle.signature.task_type}
+
+Return a JSON array of step objects, e.g.:
+[{"description": "Initialize workspace", "artifact_path": "/workspace/init.txt"}, {"description": "Implement core logic", "artifact_path": "/workspace/core.txt"}]`;
+  }
+
+  /**
+   * Parse detailed plan response from LLM
+   */
+  private parseDetailedPlanResponse(content: string): Array<{ description: string; artifact_path?: string }> {
+    try {
+      const parsed = JSON.parse(content);
+      if (Array.isArray(parsed)) {
+        return parsed.map((step: any) => ({
+          description: String(step.description || step),
+          artifact_path: step.artifact_path ? String(step.artifact_path) : undefined,
+        }));
+      }
+    } catch (e) {
+      // If JSON parsing fails, return a default plan
+      console.warn('[AttemptRunner] Failed to parse detailed plan response, using default');
+    }
     return [
       { description: 'Initialize workspace', artifact_path: '/workspace/init.txt' },
       { description: 'Implement core logic', artifact_path: '/workspace/core.txt' },
@@ -492,11 +627,56 @@ export class AttemptRunner {
     sandboxId: string,
     onTrace: (event: TraceEvent) => void
   ): Promise<{ type: string; artifact_path?: string }> {
-    // In production, use LLM to decide
-    if (state.step >= 5) {
+    const prompt = this.buildDecisionPrompt(state, config);
+    const model = this.llmClient.getModelByTier('tier1');
+    
+    const llmResult = await this.llmClient.call(prompt, { model, temperature: 0.5 });
+    
+    onTrace({
+      timestamp: new Date().toISOString(),
+      event_type: 'model_call',
+      data: { step: state.step, model, input_tokens: llmResult.input_tokens, output_tokens: llmResult.output_tokens },
+      cost_usd: llmResult.cost_usd,
+    });
+
+    // Parse the LLM response
+    return this.parseDecisionResponse(llmResult.content, state.step);
+  }
+
+  /**
+   * Build prompt for decision making
+   */
+  private buildDecisionPrompt(state: { step: number; context: string }, config: AgentConfig): string {
+    return `You are an AI decision maker. Given the current state, decide whether to continue or complete the task.
+
+Current Step: ${state.step}
+Context: ${state.context}
+Model: ${config.base_model}
+
+Return a JSON object with the decision, e.g.:
+{"type": "continue", "artifact_path": "/workspace/step_1.txt"} or {"type": "complete"}`;
+  }
+
+  /**
+   * Parse decision response from LLM
+   */
+  private parseDecisionResponse(content: string, step: number): { type: string; artifact_path?: string } {
+    try {
+      const parsed = JSON.parse(content);
+      if (parsed.type) {
+        return {
+          type: String(parsed.type),
+          artifact_path: parsed.artifact_path ? String(parsed.artifact_path) : undefined,
+        };
+      }
+    } catch (e) {
+      // If JSON parsing fails, return a default decision
+      console.warn('[AttemptRunner] Failed to parse decision response, using default');
+    }
+    if (step >= 5) {
       return { type: 'complete' };
     }
-    return { type: 'continue', artifact_path: `/workspace/step_${state.step}.txt` };
+    return { type: 'continue', artifact_path: `/workspace/step_${step}.txt` };
   }
 
   /**

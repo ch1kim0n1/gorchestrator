@@ -5,6 +5,15 @@ import {
   Deliverable,
 } from '../types/index.js';
 
+// Rubric dimensions and weights from orchestrator-rubric
+const RUBRIC_WEIGHTS = {
+  correctness: 0.3,
+  latency: 0.2,
+  robustness: 0.2,
+  cost_efficiency: 0.15,
+  resource_utilization: 0.15,
+};
+
 /**
  * Selector & Merge Engine
  * 
@@ -46,6 +55,37 @@ export class SelectorEngine {
       default:
         return this.selectHighestScore(attempts);
     }
+  }
+
+  /**
+   * Calculate weighted score using rubric dimensions
+   */
+  private calculateWeightedScore(attempt: ScoredAttempt): number {
+    const scores = attempt.scores;
+    
+    // Use GMirror scores as proxies for orchestrator rubric dimensions
+    const correctness = scores.correctness.score;
+    const robustness = scores.robustness.score;
+    const risk = 1 - scores.risk.score; // Invert risk (higher risk = lower score)
+    
+    // Cost efficiency: lower cost is better
+    const costEfficiency = Math.max(0, 1 - (attempt.cost.total_cost_usd / 0.1)); // Assume $0.10 baseline
+    
+    // Latency: use trace total wall time (lower is better)
+    const latencyScore = Math.max(0, 1 - (attempt.trace.total_wall_time_ms / 30000)); // Assume 30s baseline
+    
+    // Resource utilization: use cost as proxy (simplified)
+    const resourceUtil = costEfficiency;
+    
+    // Calculate weighted score
+    const weightedScore = 
+      correctness * RUBRIC_WEIGHTS.correctness +
+      latencyScore * RUBRIC_WEIGHTS.latency +
+      robustness * RUBRIC_WEIGHTS.robustness +
+      costEfficiency * RUBRIC_WEIGHTS.cost_efficiency +
+      resourceUtil * RUBRIC_WEIGHTS.resource_utilization;
+    
+    return weightedScore;
   }
 
   /**

@@ -10,6 +10,7 @@ import {
   ExecutionBudget,
   GBrainPrimingRequest,
 } from '../types/index.js';
+import { LLMClient } from './llm-client.js';
 
 /**
  * Intake & Priming Module
@@ -23,6 +24,7 @@ import {
 export class IntakePrimer {
   private gbrainEndpoint: string;
   private primingTimeoutMs: number;
+  private llmClient: LLMClient;
 
   constructor(config: {
     gbrainEndpoint?: string;
@@ -30,6 +32,7 @@ export class IntakePrimer {
   } = {}) {
     this.gbrainEndpoint = config.gbrainEndpoint || 'http://localhost:3000';
     this.primingTimeoutMs = config.primingTimeoutMs || 500;
+    this.llmClient = new LLMClient();
   }
 
   /**
@@ -46,7 +49,7 @@ export class IntakePrimer {
     companyContext?: string;
   }): Promise<TaskBundle> {
     const taskId = uuidv4();
-    const signature = this.generateSignature(rawTask);
+    const signature = await this.generateSignature(rawTask);
     
     // Query GBrain for priors (with timeout)
     const priors = await this.queryPriors(signature).catch((error) => {
@@ -72,7 +75,7 @@ export class IntakePrimer {
   /**
    * Generate deterministic task signature from task description and context
    */
-  private generateSignature(rawTask: {
+  private async generateSignature(rawTask: {
     description: string;
     taskType?: string;
     surfaces?: string[];
@@ -80,9 +83,9 @@ export class IntakePrimer {
     outcomeShape?: Partial<OutcomeShape>;
     userContext?: string;
     companyContext?: string;
-  }): TaskSignature {
-    const taskType = rawTask.taskType || this.inferTaskType(rawTask.description);
-    const surfaces = rawTask.surfaces || this.inferSurfaces(rawTask.description);
+  }): Promise<TaskSignature> {
+    const taskType = rawTask.taskType || await this.inferTaskType(rawTask.description);
+    const surfaces = rawTask.surfaces || await this.inferSurfaces(rawTask.description);
     
     const constraints: Constraint[] = (rawTask.constraints || []).map((c, idx) => ({
       type: c.type || 'performance',
@@ -134,9 +137,36 @@ export class IntakePrimer {
   }
 
   /**
-   * Infer task type from description using simple heuristics
+   * Infer task type from description using LLM with heuristic fallback
    */
-  private inferTaskType(description: string): string {
+  private async inferTaskType(description: string): Promise<string> {
+    try {
+      const prompt = `Classify the following task description into one of these categories:
+- code_generation: Writing new code or adding features
+- refactor: Restructuring or optimizing existing code
+- deployment: Deploying or releasing code
+- research: Investigating or analyzing
+- document_write: Writing documentation or explanations
+- general: Other tasks
+
+Task description: ${description}
+
+Return only the category name.`;
+      const model = this.llmClient.getModelByTier('tier1');
+      const result = await this.llmClient.call(prompt, { model, temperature: 0.3 });
+      const taskType = result.content.trim().toLowerCase();
+      const validTypes = ['code_generation', 'refactor', 'deployment', 'research', 'document_write', 'general'];
+      return validTypes.includes(taskType) ? taskType : this.inferTaskTypeHeuristic(description);
+    } catch (error) {
+      console.warn('[IntakePrimer] LLM task type inference failed, using heuristic:', error);
+      return this.inferTaskTypeHeuristic(description);
+    }
+  }
+
+  /**
+   * Infer task type using heuristics (fallback)
+   */
+  private inferTaskTypeHeuristic(description: string): string {
     const lowerDesc = description.toLowerCase();
     
     if (lowerDesc.includes('implement') || lowerDesc.includes('write code') || lowerDesc.includes('add feature')) {
@@ -159,9 +189,32 @@ export class IntakePrimer {
   }
 
   /**
-   * Infer affected surfaces from description
+   * Infer affected surfaces from description using LLM with heuristic fallback
    */
-  private inferSurfaces(description: string): string[] {
+  private async inferSurfaces(description: string): Promise<string[]> {
+    try {
+      const prompt = `Identify which surfaces are affected by the following task description.
+Possible surfaces: api, database, ui, auth, config, code, deployment, monitoring.
+
+Task description: ${description}
+
+Return a JSON array of surface names (e.g., ["api", "database"]).`;
+      const model = this.llmClient.getModelByTier('tier1');
+      const result = await this.llmClient.call(prompt, { model, temperature: 0.3 });
+      const parsed = JSON.parse(result.content);
+      const validSurfaces = ['api', 'database', 'ui', 'auth', 'config', 'code', 'deployment', 'monitoring'];
+      const surfaces = Array.isArray(parsed) ? parsed.filter((s: string) => validSurfaces.includes(s)) : [];
+      return surfaces.length > 0 ? surfaces : this.inferSurfacesHeuristic(description);
+    } catch (error) {
+      console.warn('[IntakePrimer] LLM surfaces inference failed, using heuristic:', error);
+      return this.inferSurfacesHeuristic(description);
+    }
+  }
+
+  /**
+   * Infer surfaces using heuristics (fallback)
+   */
+  private inferSurfacesHeuristic(description: string): string[] {
     const surfaces: string[] = [];
     const lowerDesc = description.toLowerCase();
 
