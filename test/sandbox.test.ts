@@ -13,17 +13,19 @@ describe('SandboxPoolManager (mock mode)', () => {
   it('provisionSandbox returns a Sandbox in ready or running state', async () => {
     const sandbox = await manager.provisionSandbox('attempt-1');
     expect(sandbox.sandbox_id).toBeDefined();
-    expect(['ready', 'running', 'failed']).toContain(sandbox.state);
+    expect(['ready', 'running']).toContain(sandbox.state);
   });
 
-  it('provisionSandbox respects maxConcurrency', async () => {
-    const manager2 = new SandboxPoolManager({ maxConcurrency: 2, backend: 'docker' });
-    const s1 = await manager2.provisionSandbox('a1');
-    const s2 = await manager2.provisionSandbox('a2');
+  it('provisionSandbox queues requests when at maxConcurrency', async () => {
+    const mgr = new SandboxPoolManager({ maxConcurrency: 1, backend: 'docker' });
+    const s1 = await mgr.provisionSandbox('a1');
     expect(s1.state).not.toBe('failed');
-    expect(s2.state).not.toBe('failed');
-    await manager2.destroySandbox(s1.sandbox_id);
-    await manager2.destroySandbox(s2.sandbox_id);
+    // Third should complete after s1 is destroyed (queue-drain behavior)
+    const pendingPromise = mgr.provisionSandbox('a2'); // queued
+    await mgr.destroySandbox(s1.sandbox_id); // frees slot
+    const s2 = await pendingPromise;
+    expect(['ready', 'running']).toContain(s2.state);
+    await mgr.destroySandbox(s2.sandbox_id);
   });
 
   it('executeCommand returns an object with stdout in mock mode', async () => {

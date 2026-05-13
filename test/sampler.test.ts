@@ -86,6 +86,7 @@ describe('ConfigurationSampler', () => {
     const plan = sampler.createSamplingPlan(makeTaskBundle(), priors, 3);
     const exploitConfig = plan.configs.find(c => c.provenance === 'exploit');
     expect(exploitConfig).toBeDefined();
+    expect(exploitConfig!.base_model).toBe('claude-sonnet-4-6');
   });
 
   it('strategy_distribution values sum to approximately 1', () => {

@@ -59,6 +59,7 @@ describe('GOrchestrator (e2e with mocks)', () => {
     });
     expect(result.task_id).toBeDefined();
     expect(result.winner).toBeDefined();
+    expect(result.attempts.map((a: any) => a.attempt_id)).toContain(result.winner);
     expect(Array.isArray(result.attempts)).toBe(true);
     expect(result.attempts.length).toBeGreaterThan(0);
   }, 20000);

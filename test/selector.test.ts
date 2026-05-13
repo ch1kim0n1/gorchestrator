@@ -10,12 +10,18 @@ function makeDeliverable(): Deliverable {
   };
 }
 
+function idToUuid(label: string): string {
+  const hex = Buffer.from(label).toString('hex').padEnd(12, '0').slice(0, 12);
+  return `00000000-0000-0000-0000-${hex}`;
+}
+
 function makeScoredAttempt(id: string, overallScore: number, hardGatesPassed = true): ScoredAttempt {
+  const attemptUuid = idToUuid(id);
   return {
-    attempt_id: id,
-    task_id: 'task-1',
-    config_id: `config-${id}`,
-    sandbox_id: `sandbox-${id}`,
+    attempt_id: attemptUuid,
+    task_id: '00000000-0000-0000-0000-000000000001',
+    config_id: '00000000-0000-0000-0000-000000000002',
+    sandbox_id: '00000000-0000-0000-0000-000000000003',
     status: 'completed',
     deliverable: makeDeliverable(),
     trace: { events: [], total_cost_usd: 0.01, total_tokens: 1000, total_wall_time_ms: 2000 },
@@ -47,29 +53,26 @@ describe('SelectorEngine', () => {
   });
 
   it('selectWinner (highest_score) picks the attempt with the highest overall_score', () => {
-    const result = engine.selectWinner([
-      makeScoredAttempt('low', 0.4),
-      makeScoredAttempt('high', 0.9),
-      makeScoredAttempt('mid', 0.6),
-    ]);
-    expect(result.winner_attempt_id).toBe('high');
+    const low = makeScoredAttempt('low', 0.4);
+    const high = makeScoredAttempt('high', 0.9);
+    const mid = makeScoredAttempt('mid', 0.6);
+    const result = engine.selectWinner([low, high, mid]);
+    expect(result.winner_attempt_id).toBe(high.attempt_id);
     expect(result.strategy_used).toBe('highest_score');
     expect(result.confidence).toBeGreaterThan(0);
   });
 
   it('selectWinner prefers attempt that passed hard gates', () => {
-    const result = engine.selectWinner([
-      makeScoredAttempt('failed-gates', 0.95, false),
-      makeScoredAttempt('passed-gates', 0.7, true),
-    ]);
-    expect(result.winner_attempt_id).toBe('passed-gates');
+    const failedGates = makeScoredAttempt('failed-gates', 0.95, false);
+    const passedGates = makeScoredAttempt('passed-gates', 0.7, true);
+    const result = engine.selectWinner([failedGates, passedGates]);
+    expect(result.winner_attempt_id).toBe(passedGates.attempt_id);
   });
 
   it('selectWinner with component_substitution returns a valid result', () => {
-    const result = engine.selectWinner(
-      [makeScoredAttempt('a', 0.8), makeScoredAttempt('b', 0.6)],
-      'component_substitution'
-    );
+    const a = makeScoredAttempt('a', 0.8);
+    const b = makeScoredAttempt('b', 0.6);
+    const result = engine.selectWinner([a, b], 'component_substitution');
     expect(result.winner_attempt_id).toBeDefined();
     expect(result.strategy_used).toBe('component_substitution');
   });

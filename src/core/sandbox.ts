@@ -331,6 +331,7 @@ export class SandboxPoolManager {
    * Snapshot Docker sandbox
    */
   private async snapshotDockerSandbox(sandbox: Sandbox): Promise<string> {
+    if (this.mockMode) { return `mock-snapshot-${sandbox.sandbox_id}`; }
     const containerName = `gorch-${sandbox.sandbox_id}`;
     const snapshotName = `${containerName}-snapshot-${Date.now()}`;
     
@@ -360,6 +361,7 @@ export class SandboxPoolManager {
    * Restore Docker sandbox from snapshot
    */
   private async restoreDockerSnapshot(sandbox: Sandbox, snapshotName: string): Promise<void> {
+    if (this.mockMode) { return; }
     const containerName = `gorch-${sandbox.sandbox_id}`;
     
     // Stop and remove current container

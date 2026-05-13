@@ -499,6 +499,9 @@ export class ConfigurationSampler {
     priors: GBrainPriorBundle,
     n: number
   ): SamplingPlan {
+    if (n <= 0) {
+      throw new Error(`createSamplingPlan: n must be a positive integer, got ${n}`);
+    }
     const configs: AgentConfig[] = [];
     const strategies: SamplingStrategy[] = ['exploit', 'perturb', 'explore'];
 
