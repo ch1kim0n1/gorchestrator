@@ -1,0 +1,45 @@
+replicaCount: 2
+
+image:
+  repository: gorchestrator
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+service:
+  type: ClusterIP
+  mcpPort: 3001
+  healthPort: 8080
+
+resources:
+  requests:
+    memory: "512Mi"
+    cpu: "500m"
+  limits:
+    memory: "1Gi"
+    cpu: "1000m"
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 80
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+config:
+  sandboxEnabled: "true"
+  budgetUsd: "100"
+  maxAttempts: "10"
+  tier1Threshold: "0.8"
+  tier2Threshold: "0.6"
+  logLevel: "info"
+  gmirrorEndpoint: "http://gmirror:3002"
+  gtomEndpoint: "http://gtom:3003"
+
+secrets:
+  postgresUrl: "postgres://gorchestrator:orchestrator_password@postgres:5432/gstack"
+  anthropicApiKey: "your-anthropic-api-key-here"
+  openaiApiKey: "your-openai-api-key-here"

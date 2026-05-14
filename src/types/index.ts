@@ -453,6 +453,7 @@ export const EscalationMetricsSchema = z.object({
   tier1_success_rate: z.number().min(0).max(1),
   tier2_success_rate: z.number().min(0).max(1),
   tier3_success_rate: z.number().min(0).max(1),
+  success_rate_trend: z.enum(['increasing', 'decreasing', 'stable']),
   tier1_count: z.number().int(),
   tier2_count: z.number().int(),
   tier3_count: z.number().int(),

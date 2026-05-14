@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gorchestrator-config
+  labels:
+    app: gorchestrator
+    component: gstack
+data:
+  sandbox-enabled: "true"
+  budget-usd: "100"
+  max-attempts: "10"
+  tier-1-threshold: "0.8"
+  tier-2-threshold: "0.6"
+  log-level: "info"

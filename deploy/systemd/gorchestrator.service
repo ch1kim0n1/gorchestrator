@@ -1,0 +1,32 @@
+[Unit]
+Description=GOrchestrator - Task orchestration service for G-Stack
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=gorchestrator
+Group=gorchestrator
+WorkingDirectory=/opt/gorchestrator
+Environment=NODE_ENV=production
+Environment=HEALTH_PORT=8080
+EnvironmentFile=/etc/gorchestrator/gorchestrator.env
+ExecStart=/usr/bin/node /opt/gorchestrator/dist/serve.js
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gorchestrator
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/gorchestrator /var/log/gorchestrator
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+[Install]
+WantedBy=multi-user.target

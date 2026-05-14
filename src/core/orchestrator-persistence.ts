@@ -5,12 +5,12 @@ import * as fs from 'fs';
  * SQLite Persistence Manager for GOrchestrator
  *
  * Stores attempt results, scored attempts, and task runs.
- * Gracefully degrades to an in-memory no-op fallback if better-sqlite3
- * cannot be loaded.
+ * Persistence is REQUIRED - fails if better-sqlite3 cannot be loaded.
  */
 export class OrchestratorPersistenceManager {
-  private db: any | null;
+  private db: any;
   private dbPath: string;
+  private readonly SCHEMA_VERSION = 1;
 
   constructor(dbPath?: string) {
     const dataDir = dbPath || path.join(process.cwd(), '.gorchestrator', 'data');
@@ -20,13 +20,28 @@ export class OrchestratorPersistenceManager {
       fs.mkdirSync(dataDir, { recursive: true });
       this.db = new Database(this.dbPath);
       this.initializeSchema();
-    } catch {
-      this.db = null;
+    } catch (error) {
+      throw new Error(`Persistence initialization failed: ${error}. Persistence is REQUIRED for GOrchestrator.`);
     }
   }
 
   private initializeSchema(): void {
-    if (!this.db) return;
+    // Schema versioning table
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS schema_version (
+        version INTEGER PRIMARY KEY,
+        applied_at TEXT NOT NULL
+      )
+    `);
+
+    // Check current schema version
+    const row = this.db.prepare('SELECT version FROM schema_version').get() as { version: number } | undefined;
+    const currentVersion = row?.version || 0;
+
+    if (currentVersion < this.SCHEMA_VERSION) {
+      this.runMigrations(currentVersion);
+    }
+
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS attempt_results (
         attempt_id TEXT PRIMARY KEY,
@@ -72,6 +87,20 @@ export class OrchestratorPersistenceManager {
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_attempt_results_timestamp ON attempt_results(timestamp)`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_scored_attempts_task ON scored_attempts(task_id, timestamp)`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_task_runs_timestamp ON task_runs(timestamp)`);
+
+    // Update schema version
+    this.db.prepare('INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, ?)').run(
+      this.SCHEMA_VERSION,
+      new Date().toISOString()
+    );
+  }
+
+  private runMigrations(fromVersion: number): void {
+    // Migration framework - add future migrations here
+    for (let v = fromVersion + 1; v <= this.SCHEMA_VERSION; v++) {
+      console.log(`[OrchestratorPersistenceManager] Running migration to version ${v}`);
+      // Add migration logic here when needed
+    }
   }
 
   addAttemptResult(result: {
@@ -84,7 +113,6 @@ export class OrchestratorPersistenceManager {
     wall_time_ms: number;
     cost_usd: number;
   }): void {
-    if (!this.db) return;
     this.db.prepare(`
       INSERT OR REPLACE INTO attempt_results
       (attempt_id, task_id, agent_config_id, status, output, error, duration_ms, cost_usd, timestamp)
@@ -105,7 +133,6 @@ export class OrchestratorPersistenceManager {
     completeness_score?: number;
     hard_gates_passed: boolean;
   }): void {
-    if (!this.db) return;
     this.db.prepare(`
       INSERT OR REPLACE INTO scored_attempts
       (attempt_id, task_id, overall_score, correctness_score, efficiency_score, completeness_score, hard_gates_passed, timestamp)
@@ -127,7 +154,6 @@ export class OrchestratorPersistenceManager {
     total_duration_ms: number;
     winner_attempt_id?: string;
   }): void {
-    if (!this.db) return;
     this.db.prepare(`
       INSERT OR REPLACE INTO task_runs
       (task_id, description, total_attempts, successful_attempts, total_cost_usd, total_duration_ms, winner_attempt_id, timestamp)
@@ -146,7 +172,6 @@ export class OrchestratorPersistenceManager {
     cost_usd: number;
     timestamp: string;
   }> {
-    if (!this.db) return [];
     return this.db.prepare(`
       SELECT attempt_id, status, duration_ms, cost_usd, timestamp FROM attempt_results
       WHERE task_id = ?
@@ -167,7 +192,6 @@ export class OrchestratorPersistenceManager {
     hard_gates_passed: boolean;
     timestamp: string;
   }> {
-    if (!this.db) return [];
     const rows = this.db.prepare(`
       SELECT attempt_id, overall_score, hard_gates_passed, timestamp FROM scored_attempts
       WHERE task_id = ?
@@ -190,7 +214,6 @@ export class OrchestratorPersistenceManager {
     total_cost_usd: number;
     timestamp: string;
   }> {
-    if (!this.db) return [];
     return this.db.prepare(`
       SELECT task_id, description, total_attempts, successful_attempts, total_cost_usd, timestamp FROM task_runs
       ORDER BY timestamp DESC
@@ -206,14 +229,13 @@ export class OrchestratorPersistenceManager {
   }
 
   cleanupOldData(): void {
-    if (!this.db) return;
     this.db.prepare(`DELETE FROM attempt_results WHERE attempt_id NOT IN (SELECT attempt_id FROM attempt_results ORDER BY timestamp DESC LIMIT 1000)`).run();
     this.db.prepare(`DELETE FROM scored_attempts WHERE attempt_id NOT IN (SELECT attempt_id FROM scored_attempts ORDER BY timestamp DESC LIMIT 1000)`).run();
     this.db.prepare(`DELETE FROM task_runs WHERE task_id NOT IN (SELECT task_id FROM task_runs ORDER BY timestamp DESC LIMIT 1000)`).run();
   }
 
   close(): void {
-    if (this.db) this.db.close();
+    this.db.close();
   }
 
   getDbPath(): string {

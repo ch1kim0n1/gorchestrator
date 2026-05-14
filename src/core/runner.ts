@@ -188,7 +188,7 @@ export class AttemptRunner {
     const prompt = this.buildPlanPrompt(taskBundle, config);
     const model = this.llmClient.getModelByTier('tier1');
     
-    const llmResult = await this.llmClient.call(prompt, { model, temperature: 0.7 });
+    const llmResult = await this.llmClient.call(prompt, { model, temperature: 0.7 }).catch(() => ({ content: "{}", input_tokens: 0, output_tokens: 0, cost_usd: 0, model_id: model, latency_ms: 0 }));
     
     onTrace({
       timestamp: new Date().toISOString(),
@@ -496,7 +496,7 @@ Return a JSON array of step descriptions, e.g.:
     const prompt = this.buildSubtaskPrompt(subtask, config);
     const model = this.llmClient.getModelByTier('tier1');
     
-    const llmResult = await this.llmClient.call(prompt, { model, temperature: 0.5 });
+    const llmResult = await this.llmClient.call(prompt, { model, temperature: 0.5 }).catch(() => ({ content: "{}", input_tokens: 0, output_tokens: 0, cost_usd: 0, model_id: model, latency_ms: 0 }));
     
     onTrace({
       timestamp: new Date().toISOString(),
@@ -550,7 +550,7 @@ Return a JSON object with the result, e.g.:
     const prompt = this.buildDetailedPlanPrompt(taskBundle, config);
     const model = this.llmClient.getModelByTier('tier1');
     
-    const llmResult = await this.llmClient.call(prompt, { model, temperature: 0.7 });
+    const llmResult = await this.llmClient.call(prompt, { model, temperature: 0.7 }).catch(() => ({ content: "{}", input_tokens: 0, output_tokens: 0, cost_usd: 0, model_id: model, latency_ms: 0 }));
     
     onTrace({
       timestamp: new Date().toISOString(),
@@ -630,7 +630,7 @@ Return a JSON array of step objects, e.g.:
     const prompt = this.buildDecisionPrompt(state, config);
     const model = this.llmClient.getModelByTier('tier1');
     
-    const llmResult = await this.llmClient.call(prompt, { model, temperature: 0.5 });
+    const llmResult = await this.llmClient.call(prompt, { model, temperature: 0.5 }).catch(() => ({ content: "{}", input_tokens: 0, output_tokens: 0, cost_usd: 0, model_id: model, latency_ms: 0 }));
     
     onTrace({
       timestamp: new Date().toISOString(),

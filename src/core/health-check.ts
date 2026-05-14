@@ -1,4 +1,5 @@
 import { ReceiptRegistry } from './receipt-registry.js';
+import { wilsonCI, formatWilsonCI, WilsonCI } from '../../../shared/src/core/wilson-ci.js';
 
 export interface HealthCheckResult {
   status: 'healthy' | 'degraded' | 'unhealthy';
@@ -14,6 +15,10 @@ export interface HealthCheckResult {
     uptime_ms: number;
     memory_usage_mb: number;
     recent_errors: number;
+  };
+  statistical_confidence?: {
+    success_rate_wilson_ci: WilsonCI | null;
+    error_rate_wilson_ci: WilsonCI | null;
   };
 }
 
@@ -70,6 +75,17 @@ export class HealthChecker {
     const memoryUsage = process.memoryUsage();
     const uptime = Date.now() - this.startTime;
 
+    // Get recent receipts for statistical analysis
+    const now = new Date();
+    const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
+    const recentReceipts = await this.registry.getAllBetween(oneHourAgo, now);
+    
+    // Calculate Wilson CIs for success rate
+    const totalReceipts = recentReceipts.length;
+    const successfulReceipts = recentReceipts.filter(r => r.verdict === 'pass').length;
+    const successRateCI = totalReceipts > 0 ? wilsonCI(successfulReceipts, totalReceipts) : null;
+    const errorRateCI = totalReceipts > 0 ? wilsonCI(totalReceipts - successfulReceipts, totalReceipts) : null;
+
     // Determine overall status
     let status: 'healthy' | 'degraded' | 'unhealthy' = 'healthy';
     if (memoryUsage.heapUsed / memoryUsage.heapTotal > 0.9) {
@@ -90,6 +106,10 @@ export class HealthChecker {
         uptime_ms: uptime,
         memory_usage_mb: memoryUsage.heapUsed / 1024 / 1024,
         recent_errors: this.getRecentErrorCount(),
+      },
+      statistical_confidence: {
+        success_rate_wilson_ci: successRateCI,
+        error_rate_wilson_ci: errorRateCI,
       },
     };
   }

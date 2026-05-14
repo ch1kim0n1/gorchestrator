@@ -11,7 +11,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import { encoding_for_model, get_encoding, TiktokenModel } from 'tiktoken';
-import { createLogger } from '../../shared/src/core/structured-logger.js';
+import { createLogger } from '../../../shared/src/core/structured-logger.js';
 
 export interface ModelPricing {
   /** USD per 1M input tokens. */
@@ -80,7 +80,7 @@ export function estimateCostUsd(
 ): number {
   const pricing = MODEL_PRICING[modelId];
   if (!pricing) {
-    console.warn(\[LLMClient] No pricing for model: \\);
+    console.warn(`[LLMClient] No pricing for model: ${modelId}`);
     return 0;
   }
   return (

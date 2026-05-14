@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "gorchestrator.fullname" . }}-config
+  labels:
+    {{- include "gorchestrator.labels" . | nindent 4 }}
+data:
+  sandbox-enabled: {{ .Values.config.sandboxEnabled | quote }}
+  budget-usd: {{ .Values.config.budgetUsd | quote }}
+  max-attempts: {{ .Values.config.maxAttempts | quote }}
+  tier-1-threshold: {{ .Values.config.tier1Threshold | quote }}
+  tier-2-threshold: {{ .Values.config.tier2Threshold | quote }}
+  log-level: {{ .Values.config.logLevel | quote }}
+  gmirror-endpoint: {{ .Values.config.gmirrorEndpoint | quote }}
+  gtom-endpoint: {{ .Values.config.gtomEndpoint | quote }}
