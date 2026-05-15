@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import * as crypto from 'crypto';
+import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import {
@@ -68,6 +69,7 @@ export class GOrchestrator {
   private gstackEndpoint: string;
   private receiptRegistry: ReceiptRegistry;
   private successRateHistory: number[]; // Track success rate for drift detection
+  private successRateHistoryPath: string;
   private persistence: OrchestratorPersistenceManager;
   private multiModelConfig: MultiModelConfig;
   private tierConfigs: Map<string, TierConfig>;
@@ -99,7 +101,8 @@ export class GOrchestrator {
     this.gstackEndpoint = config.gstackEndpoint || 'http://localhost:3001';
     this.gtomEndpoint = config.gtomEndpoint || 'http://localhost:3003';
     this.receiptRegistry = new ReceiptRegistry('gorchestrator');
-    this.successRateHistory = [];
+    this.successRateHistoryPath = path.join(process.cwd(), '.gbrain-corpus', 'gorchestrator-success-rate-history.json');
+    this.successRateHistory = this.loadSuccessRateHistory();
     this.persistence = new OrchestratorPersistenceManager(config.dbPath);
     this.logger = new StructuredLogger('gorchestrator');
     
@@ -400,6 +403,7 @@ export class GOrchestrator {
     const successRate = scoredAttempts.filter(a => a.status === 'completed').length / scoredAttempts.length;
     this.successRateHistory.push(successRate);
     if (this.successRateHistory.length > 50) this.successRateHistory.shift();
+    this.saveSuccessRateHistory();
 
     // Cleanup
     await this.sandboxManager.cleanup();
@@ -1074,6 +1078,26 @@ export class GOrchestrator {
     const start = performance.now();
     await this.sandboxManager.cleanup();
     this.latencyTracker.record(performance.now() - start);
+  }
+
+  private loadSuccessRateHistory(): number[] {
+    try {
+      if (!fs.existsSync(this.successRateHistoryPath)) return [];
+      const parsed = JSON.parse(fs.readFileSync(this.successRateHistoryPath, 'utf8'));
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter((value): value is number => typeof value === 'number' && Number.isFinite(value)).slice(-50);
+    } catch {
+      return [];
+    }
+  }
+
+  private saveSuccessRateHistory(): void {
+    try {
+      fs.mkdirSync(path.dirname(this.successRateHistoryPath), { recursive: true });
+      fs.writeFileSync(this.successRateHistoryPath, JSON.stringify(this.successRateHistory.slice(-50), null, 2));
+    } catch {
+      // Drift history persistence is best-effort; task execution should not fail because telemetry cannot be saved.
+    }
   }
 
   /**
