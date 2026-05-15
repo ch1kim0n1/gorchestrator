@@ -12,12 +12,27 @@ describe('GOrchestrator MCP Server', () => {
   });
 
   it('declares the expected tool names', () => {
-    for (const tool of ['gorch_run', 'gorch_health', 'gorch_config_sample']) {
+    for (const tool of [
+      'gorch_run',
+      'gorch_health',
+      'gorch_config_sample',
+      'gorch_get_receipts',
+      'gorch_get_drift',
+      'gorch_sandbox_stats',
+      'gorch_get_sandbox_stats',
+    ]) {
       expect(serverSource).toContain(tool);
     }
   });
 
   it('declares required schemas for task tools', () => {
     expect(serverSource).toContain("required: ['task']");
+  });
+
+  it('enforces token auth, read/write scopes, and rate limits for MCP calls', () => {
+    expect(serverSource).toContain('requiredScopeForTool');
+    expect(serverSource).toContain('Insufficient permissions: requires');
+    expect(serverSource).toContain('Rate limit exceeded');
+    expect(serverSource).toContain('GORCHESTRATOR_MCP_TOKEN');
   });
 });
