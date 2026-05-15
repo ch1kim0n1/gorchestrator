@@ -35,11 +35,12 @@ export class AttemptRunner {
     gstackEndpoint?: string;
     maxWallTimeMs?: number;
     llmConfig?: LLMClientConfig;
+    llmClient?: LLMClient;
   }) {
     this.sandboxManager = config.sandboxManager;
     this.gstackEndpoint = config.gstackEndpoint || 'http://localhost:3001';
     this.maxWallTimeMs = config.maxWallTimeMs || 300000;
-    this.llmClient = new LLMClient(config.llmConfig);
+    this.llmClient = config.llmClient ?? new LLMClient(config.llmConfig);
   }
 
   /**
@@ -608,14 +609,53 @@ Return a JSON array of step objects, e.g.:
     sandboxId: string,
     onTrace: (event: TraceEvent) => void
   ): Promise<string> {
+    const prompt = this.buildStepExecutionPrompt(step, config);
+    const model = this.llmClient.getModelByTier('tier1');
+    const llmResult = await this.llmClient.call(prompt, { model, temperature: 0.4 }).catch(() => ({
+      content: '{}',
+      input_tokens: 0,
+      output_tokens: 0,
+      cost_usd: 0,
+      model_id: model,
+      latency_ms: 0,
+    }));
+
     onTrace({
       timestamp: new Date().toISOString(),
-      event_type: 'tool_call',
-      data: { step: step.description },
-      cost_usd: 0.0005,
+      event_type: 'model_call',
+      data: { step: step.description, model, input_tokens: llmResult.input_tokens, output_tokens: llmResult.output_tokens },
+      cost_usd: llmResult.cost_usd,
     });
 
-    return `[Completed: ${step.description}]`;
+    return this.parseExecutionResult(llmResult.content, step.description);
+  }
+
+  private buildStepExecutionPrompt(
+    step: { description: string; artifact_path?: string },
+    config: AgentConfig
+  ): string {
+    return `Execute this orchestrator plan step as the configured agent.
+
+Step: ${step.description}
+Artifact path: ${step.artifact_path || 'none'}
+Base model: ${config.base_model}
+Reasoning style: ${config.reasoning_style}
+Skills: ${config.skill_set.join(', ')}
+
+Return strict JSON:
+{"result": "the concrete deliverable or execution output", "confidence": 0.0}`;
+  }
+
+  private parseExecutionResult(content: string, label: string): string {
+    try {
+      const parsed = JSON.parse(content);
+      if (parsed.result) {
+        return String(parsed.result);
+      }
+    } catch (e) {
+      console.warn('[AttemptRunner] Failed to parse execution response, using fallback');
+    }
+    return `[Executed by LLM fallback: ${label}]`;
   }
 
   /**
@@ -688,14 +728,38 @@ Return a JSON object with the decision, e.g.:
     sandboxId: string,
     onTrace: (event: TraceEvent) => void
   ): Promise<string> {
+    const prompt = this.buildActionExecutionPrompt(action, config);
+    const model = this.llmClient.getModelByTier('tier1');
+    const llmResult = await this.llmClient.call(prompt, { model, temperature: 0.4 }).catch(() => ({
+      content: '{}',
+      input_tokens: 0,
+      output_tokens: 0,
+      cost_usd: 0,
+      model_id: model,
+      latency_ms: 0,
+    }));
+
     onTrace({
       timestamp: new Date().toISOString(),
-      event_type: 'decision',
-      data: { action },
-      cost_usd: 0.0005,
+      event_type: 'model_call',
+      data: { action, model, input_tokens: llmResult.input_tokens, output_tokens: llmResult.output_tokens },
+      cost_usd: llmResult.cost_usd,
     });
 
-    return `[Action executed]`;
+    return this.parseExecutionResult(llmResult.content, action.type);
+  }
+
+  private buildActionExecutionPrompt(action: { type: string; artifact_path?: string }, config: AgentConfig): string {
+    return `Execute the next ReAct-style agent action.
+
+Action type: ${action.type}
+Artifact path: ${action.artifact_path || 'none'}
+Base model: ${config.base_model}
+Reasoning style: ${config.reasoning_style}
+Skills: ${config.skill_set.join(', ')}
+
+Return strict JSON:
+{"result": "the concrete action output", "confidence": 0.0}`;
   }
 
   /**

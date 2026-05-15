@@ -11,6 +11,7 @@ import {
   GStackSkillManifest,
   GBrainPriorBundle,
 } from '../types/index.js';
+import { LLMClient } from './llm-client.js';
 
 /**
  * Configuration Sampler
@@ -25,11 +26,13 @@ export class ConfigurationSampler {
   private gstackEndpoint: string;
   private defaultModels: string[];
   private defaultSkills: string[];
+  private llmClient: LLMClient;
 
   constructor(config: {
     gstackEndpoint?: string;
     defaultModels?: string[];
     defaultSkills?: string[];
+    llmClient?: LLMClient;
   } = {}) {
     this.gstackEndpoint = config.gstackEndpoint || 'http://localhost:3001';
     this.defaultModels = config.defaultModels || [
@@ -43,6 +46,7 @@ export class ConfigurationSampler {
       'test_generation',
       'deployment',
     ];
+    this.llmClient = config.llmClient ?? new LLMClient();
   }
 
   /**
@@ -180,14 +184,20 @@ export class ConfigurationSampler {
       case 'perturb':
         // Take a winner and vary parameters
         const baseConfig = this.selectWinnerConfig(taskBundle, index);
-        const perturbation = this.generatePerturbation(index);
-        baseModel = baseConfig?.base_model || this.defaultModels[0];
-        reasoningBudget = this.perturbValue(baseConfig?.reasoning_budget || 100000, perturbation, 0.2);
-        skillSet = this.perturbSkillSet(baseConfig?.skill_set || this.selectRelevantSkills(availableSkills, taskBundle), perturbation);
-        decompositionStrategy = this.perturbStrategy(baseConfig?.decomposition_strategy || 'hierarchical', perturbation);
-        toolScopes = this.perturbToolScopes(baseConfig?.tool_scopes || this.defaultToolScopes(), perturbation);
-        reasoningStyle = this.perturbReasoningStyle(baseConfig?.reasoning_style || 'depth_first', perturbation);
-        sampling = this.perturbSampling(baseConfig?.sampling || this.defaultSampling(), perturbation);
+        const mechanicalPerturbation = this.generateMechanicalPerturbation(baseConfig, availableSkills, taskBundle, index);
+        const llmPerturbation = await this.generateLLMPerturbation(
+          baseConfig,
+          mechanicalPerturbation,
+          taskBundle,
+          availableSkills
+        );
+        baseModel = llmPerturbation.base_model;
+        reasoningBudget = llmPerturbation.reasoning_budget;
+        skillSet = llmPerturbation.skill_set;
+        decompositionStrategy = llmPerturbation.decomposition_strategy;
+        toolScopes = llmPerturbation.tool_scopes;
+        reasoningStyle = llmPerturbation.reasoning_style;
+        sampling = llmPerturbation.sampling;
         parentConfigId = baseConfig?.config_id;
         break;
 
@@ -295,6 +305,106 @@ export class ConfigurationSampler {
   private generatePerturbation(index: number): number {
     // Deterministic pseudo-random perturbation
     return ((index * 9301 + 49297) % 233280) / 233280; // [0, 1]
+  }
+
+  private generateMechanicalPerturbation(
+    baseConfig: AgentConfig | undefined,
+    availableSkills: GStackSkillManifest[],
+    taskBundle: TaskBundle,
+    index: number
+  ): Omit<AgentConfig, 'config_id' | 'provenance' | 'parent_config_id' | 'metadata'> {
+    const perturbation = this.generatePerturbation(index);
+    const baseSkills = baseConfig?.skill_set || this.selectRelevantSkills(availableSkills, taskBundle);
+
+    return {
+      base_model: baseConfig?.base_model || this.defaultModels[0],
+      reasoning_budget: this.perturbValue(baseConfig?.reasoning_budget || 100000, perturbation, 0.2),
+      skill_set: this.perturbSkillSet(baseSkills, perturbation),
+      decomposition_strategy: this.perturbStrategy(baseConfig?.decomposition_strategy || 'hierarchical', perturbation),
+      tool_scopes: this.perturbToolScopes(baseConfig?.tool_scopes || this.defaultToolScopes(), perturbation),
+      reasoning_style: this.perturbReasoningStyle(baseConfig?.reasoning_style || 'depth_first', perturbation),
+      sampling: this.perturbSampling(baseConfig?.sampling || this.defaultSampling(), perturbation),
+    };
+  }
+
+  private async generateLLMPerturbation(
+    baseConfig: AgentConfig | undefined,
+    fallbackConfig: Omit<AgentConfig, 'config_id' | 'provenance' | 'parent_config_id' | 'metadata'>,
+    taskBundle: TaskBundle,
+    availableSkills: GStackSkillManifest[]
+  ): Promise<Omit<AgentConfig, 'config_id' | 'provenance' | 'parent_config_id' | 'metadata'>> {
+    const prompt = `Create an intentionally perturbed agent configuration for this task.
+
+Task: ${taskBundle.raw_description}
+Task type: ${taskBundle.signature.task_type}
+Surfaces: ${taskBundle.signature.surfaces.join(', ')}
+Base winning config: ${JSON.stringify(baseConfig || fallbackConfig)}
+Available skills: ${availableSkills.map(skill => skill.skill_id).join(', ') || this.defaultSkills.join(', ')}
+
+Return strict JSON with keys:
+{
+  "base_model": "model id",
+  "reasoning_budget": 100000,
+  "skill_set": ["skill id"],
+  "decomposition_strategy": "strategy",
+  "tool_scopes": [{"tool_name":"filesystem","access_level":"write"}],
+  "reasoning_style": "depth_first" | "breadth_first" | "plan_then_act" | "react_style" | "hybrid",
+  "sampling": {"temperature":0.7,"top_p":0.9,"frequency_penalty":0,"presence_penalty":0}
+}`;
+
+    try {
+      const model = this.llmClient.getModelByTier('tier1');
+      const result = await this.llmClient.call(prompt, { model, temperature: 0.4 });
+      const parsed = JSON.parse(result.content);
+      return this.normalizeLLMConfig(parsed, fallbackConfig);
+    } catch (error) {
+      return fallbackConfig;
+    }
+  }
+
+  private normalizeLLMConfig(
+    parsed: Record<string, any>,
+    fallback: Omit<AgentConfig, 'config_id' | 'provenance' | 'parent_config_id' | 'metadata'>
+  ): Omit<AgentConfig, 'config_id' | 'provenance' | 'parent_config_id' | 'metadata'> {
+    const validStyles: ReasoningStyle[] = ['depth_first', 'breadth_first', 'plan_then_act', 'react_style', 'hybrid'];
+    const toolScopes = Array.isArray(parsed.tool_scopes)
+      ? parsed.tool_scopes
+          .filter((scope: any) => typeof scope?.tool_name === 'string')
+          .map((scope: any) => ({
+            tool_name: String(scope.tool_name),
+            access_level: ['none', 'read', 'write', 'admin'].includes(scope.access_level)
+              ? scope.access_level
+              : 'read',
+            constraints: Array.isArray(scope.constraints) ? scope.constraints.map(String) : undefined,
+          }))
+      : fallback.tool_scopes;
+
+    return {
+      base_model: typeof parsed.base_model === 'string' ? parsed.base_model : fallback.base_model,
+      reasoning_budget: typeof parsed.reasoning_budget === 'number' && parsed.reasoning_budget > 0
+        ? Math.round(parsed.reasoning_budget)
+        : fallback.reasoning_budget,
+      skill_set: Array.isArray(parsed.skill_set) && parsed.skill_set.length > 0
+        ? parsed.skill_set.map(String)
+        : fallback.skill_set,
+      decomposition_strategy: typeof parsed.decomposition_strategy === 'string'
+        ? parsed.decomposition_strategy
+        : fallback.decomposition_strategy,
+      tool_scopes: toolScopes.length > 0 ? toolScopes : fallback.tool_scopes,
+      reasoning_style: validStyles.includes(parsed.reasoning_style) ? parsed.reasoning_style : fallback.reasoning_style,
+      sampling: {
+        temperature: this.clampNumber(parsed.sampling?.temperature, fallback.sampling.temperature, 0, 2),
+        top_p: this.clampNumber(parsed.sampling?.top_p, fallback.sampling.top_p, 0.1, 1),
+        frequency_penalty: this.clampNumber(parsed.sampling?.frequency_penalty, fallback.sampling.frequency_penalty, -2, 2),
+        presence_penalty: this.clampNumber(parsed.sampling?.presence_penalty, fallback.sampling.presence_penalty, -2, 2),
+      },
+    };
+  }
+
+  private clampNumber(value: unknown, fallback: number, min: number, max: number): number {
+    return typeof value === 'number' && Number.isFinite(value)
+      ? Math.max(min, Math.min(max, value))
+      : fallback;
   }
 
   /**

@@ -302,7 +302,7 @@ export class GOrchestrator {
 
     // Phase 5: Selection
     this.logger.info('Phase 5: Selection');
-    const selectionResult = this.selectorEngine.selectWinner(scoredAttempts);
+    const selectionResult = await this.selectorEngine.selectWinner(scoredAttempts);
     
     // Mark winner in attempts
     scoredAttempts = scoredAttempts.map(a => ({

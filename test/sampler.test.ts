@@ -1,6 +1,7 @@
 // gorchestrator/test/sampler.test.ts
 import { ConfigurationSampler } from '../src/core/sampler.js';
 import { GBrainPriorBundle, TaskBundle } from '../src/types/index.js';
+import { LLMClient } from '../src/core/llm-client.js';
 
 function makeEmptyPriors(): GBrainPriorBundle {
   return {
@@ -93,5 +94,58 @@ describe('ConfigurationSampler', () => {
     const plan = sampler.createSamplingPlan(makeTaskBundle(), makeEmptyPriors(), 5);
     const total = Object.values(plan.strategy_distribution).reduce((a, b) => a + b, 0);
     expect(total).toBeCloseTo(1, 1);
+  });
+
+  it('uses LLM-guided perturbation when sampling perturb configs', async () => {
+    const priors: GBrainPriorBundle = {
+      ...makeEmptyPriors(),
+      winning_configs: [
+        {
+          config: {
+            config_id: '00000000-0000-0000-0000-000000000099',
+            base_model: 'claude-sonnet-4-6',
+            reasoning_budget: 100000,
+            skill_set: ['debug', 'test'],
+            decomposition_strategy: 'waterfall',
+            tool_scopes: [],
+            reasoning_style: 'plan_then_act',
+            sampling: { temperature: 0.7, top_p: 0.9, frequency_penalty: 0, presence_penalty: 0 },
+            provenance: 'exploit',
+          },
+          win_rate: 0.9,
+          n: 10,
+        },
+      ],
+      recommended_n: 3,
+    };
+    const task = { ...makeTaskBundle(), priors };
+    const call = jest.fn().mockResolvedValue({
+      content: JSON.stringify({
+        base_model: 'claude-sonnet-4-6',
+        reasoning_budget: 120000,
+        skill_set: ['debug', 'security_scan'],
+        decomposition_strategy: 'iterative',
+        tool_scopes: [{ tool_name: 'filesystem', access_level: 'write' }],
+        reasoning_style: 'hybrid',
+        sampling: { temperature: 0.55, top_p: 0.85, frequency_penalty: 0, presence_penalty: 0.1 },
+      }),
+      input_tokens: 50,
+      output_tokens: 30,
+      cost_usd: 0.001,
+      model_id: 'claude-haiku-4-5-20251001',
+      latency_ms: 1,
+    });
+    const fakeClient = {
+      call,
+      getModelByTier: jest.fn().mockReturnValue('claude-haiku-4-5-20251001'),
+    } as unknown as LLMClient;
+    const llmSampler = new ConfigurationSampler({ llmClient: fakeClient });
+
+    const plan = await llmSampler.sampleConfigurations(task, 2);
+    const perturbConfig = plan.configs.find(config => config.provenance === 'perturb');
+
+    expect(call).toHaveBeenCalledTimes(1);
+    expect(perturbConfig?.reasoning_style).toBe('hybrid');
+    expect(perturbConfig?.skill_set).toContain('security_scan');
   });
 });

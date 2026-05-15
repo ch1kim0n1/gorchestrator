@@ -1,6 +1,7 @@
 // gorchestrator/test/selector.test.ts
 import { SelectorEngine } from '../src/core/selector.js';
 import { ScoredAttempt, Deliverable } from '../src/types/index.js';
+import { LLMClient } from '../src/core/llm-client.js';
 
 function makeDeliverable(): Deliverable {
   return {
@@ -48,33 +49,62 @@ describe('SelectorEngine', () => {
     engine = new SelectorEngine();
   });
 
-  it('selectWinner throws when no attempts provided', () => {
-    expect(() => engine.selectWinner([])).toThrow('No attempts to select from');
+  it('selectWinner throws when no attempts provided', async () => {
+    await expect(engine.selectWinner([])).rejects.toThrow('No attempts to select from');
   });
 
-  it('selectWinner (highest_score) picks the attempt with the highest overall_score', () => {
+  it('selectWinner (highest_score) picks the attempt with the highest overall_score', async () => {
     const low = makeScoredAttempt('low', 0.4);
     const high = makeScoredAttempt('high', 0.9);
     const mid = makeScoredAttempt('mid', 0.6);
-    const result = engine.selectWinner([low, high, mid]);
+    const result = await engine.selectWinner([low, high, mid]);
     expect(result.winner_attempt_id).toBe(high.attempt_id);
     expect(result.strategy_used).toBe('highest_score');
     expect(result.confidence).toBeGreaterThan(0);
   });
 
-  it('selectWinner prefers attempt that passed hard gates', () => {
+  it('selectWinner prefers attempt that passed hard gates', async () => {
     const failedGates = makeScoredAttempt('failed-gates', 0.95, false);
     const passedGates = makeScoredAttempt('passed-gates', 0.7, true);
-    const result = engine.selectWinner([failedGates, passedGates]);
+    const result = await engine.selectWinner([failedGates, passedGates]);
     expect(result.winner_attempt_id).toBe(passedGates.attempt_id);
   });
 
-  it('selectWinner with component_substitution returns a valid result', () => {
+  it('selectWinner with component_substitution returns a valid result', async () => {
     const a = makeScoredAttempt('a', 0.8);
     const b = makeScoredAttempt('b', 0.6);
-    const result = engine.selectWinner([a, b], 'component_substitution');
+    const result = await engine.selectWinner([a, b], 'component_substitution');
     expect(result.winner_attempt_id).toBeDefined();
     expect(result.strategy_used).toBe('component_substitution');
+  });
+
+  it('uses LLM judgment to select among valid attempts', async () => {
+    const low = makeScoredAttempt('low', 0.4);
+    const high = makeScoredAttempt('high', 0.9);
+    const call = jest.fn().mockResolvedValue({
+      content: JSON.stringify({
+        winner_attempt_id: low.attempt_id,
+        rationale: 'Lower score has a more complete deliverable for the requested task.',
+        confidence: 0.74,
+      }),
+      input_tokens: 80,
+      output_tokens: 20,
+      cost_usd: 0.001,
+      model_id: 'claude-sonnet-4-6',
+      latency_ms: 1,
+    });
+    const fakeClient = {
+      call,
+      getModelByTier: jest.fn().mockReturnValue('claude-sonnet-4-6'),
+    } as unknown as LLMClient;
+    const llmEngine = new SelectorEngine({ llmClient: fakeClient });
+
+    const result = await llmEngine.selectWinner([low, high]);
+
+    expect(call).toHaveBeenCalledTimes(1);
+    expect(result.winner_attempt_id).toBe(low.attempt_id);
+    expect(result.rationale).toContain('more complete deliverable');
+    expect(result.confidence).toBe(0.74);
   });
 
   it('getSelectionStats calculates average score correctly', () => {

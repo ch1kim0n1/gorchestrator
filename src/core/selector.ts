@@ -4,6 +4,7 @@ import {
   SelectionStrategy,
   Deliverable,
 } from '../types/index.js';
+import { LLMClient } from './llm-client.js';
 
 // Rubric dimensions and weights from orchestrator-rubric
 const RUBRIC_WEIGHTS = {
@@ -25,20 +26,23 @@ const RUBRIC_WEIGHTS = {
  */
 export class SelectorEngine {
   private defaultStrategy: SelectionStrategy;
+  private llmClient: LLMClient;
 
   constructor(config: {
     defaultStrategy?: SelectionStrategy;
+    llmClient?: LLMClient;
   } = {}) {
     this.defaultStrategy = config.defaultStrategy || 'highest_score';
+    this.llmClient = config.llmClient ?? new LLMClient();
   }
 
   /**
    * Main entry point: select winner from scored attempts
    */
-  selectWinner(
+  async selectWinner(
     attempts: ScoredAttempt[],
     strategy?: SelectionStrategy
-  ): SelectionResult {
+  ): Promise<SelectionResult> {
     if (attempts.length === 0) {
       throw new Error('No attempts to select from');
     }
@@ -47,14 +51,76 @@ export class SelectorEngine {
 
     switch (selectedStrategy) {
       case 'highest_score':
-        return this.selectHighestScore(attempts);
+        return this.selectWithLLMJudgment(attempts);
       case 'component_substitution':
         return this.selectWithComponentSubstitution(attempts);
       case 'synthesized_merge':
         return this.selectWithSynthesizedMerge(attempts);
       default:
-        return this.selectHighestScore(attempts);
+        return this.selectWithLLMJudgment(attempts);
     }
+  }
+
+  private async selectWithLLMJudgment(attempts: ScoredAttempt[]): Promise<SelectionResult> {
+    const validAttempts = attempts.filter(
+      a => a.status === 'completed' && a.scores.hard_gates_passed && a.deliverable
+    );
+    if (validAttempts.length === 0) {
+      return this.selectHighestScore(attempts);
+    }
+
+    const prompt = this.buildSelectionPrompt(validAttempts);
+    try {
+      const model = this.llmClient.getModelByTier('tier2');
+      const result = await this.llmClient.call(prompt, { model, temperature: 0.2 });
+      const parsed = JSON.parse(result.content);
+      const winner = validAttempts.find(a => a.attempt_id === parsed.winner_attempt_id);
+      if (!winner?.deliverable) {
+        return this.selectHighestScore(attempts);
+      }
+
+      return {
+        winner_attempt_id: winner.attempt_id,
+        strategy_used: 'highest_score',
+        selected_deliverable: winner.deliverable,
+        rationale: typeof parsed.rationale === 'string'
+          ? parsed.rationale
+          : `LLM selected attempt ${winner.attempt_id}`,
+        confidence: this.clampConfidence(parsed.confidence, this.calculateConfidence(winner, validAttempts)),
+      };
+    } catch (error) {
+      return this.selectHighestScore(attempts);
+    }
+  }
+
+  private buildSelectionPrompt(attempts: ScoredAttempt[]): string {
+    const summary = attempts.map(attempt => ({
+      attempt_id: attempt.attempt_id,
+      overall_score: attempt.scores.overall_score,
+      hard_gates_passed: attempt.scores.hard_gates_passed,
+      correctness: attempt.scores.correctness.score,
+      robustness: attempt.scores.robustness.score,
+      risk: attempt.scores.risk.score,
+      cost_usd: attempt.cost.total_cost_usd,
+      wall_time_ms: attempt.wall_time_ms,
+      content_preview: attempt.deliverable?.content.slice(0, 1000),
+      artifact_paths: attempt.deliverable?.artifacts.map(artifact => artifact.path) || [],
+    }));
+
+    return `Judge the best GOrchestrator attempt for production use.
+
+Consider score, hard gates, correctness, robustness, risk, cost, latency, and deliverable quality.
+
+${JSON.stringify(summary, null, 2)}
+
+Return strict JSON:
+{"winner_attempt_id": "uuid", "rationale": "brief reason", "confidence": 0.0}`;
+  }
+
+  private clampConfidence(value: unknown, fallback: number): number {
+    return typeof value === 'number' && Number.isFinite(value)
+      ? Math.max(0, Math.min(1, value))
+      : fallback;
   }
 
   /**
