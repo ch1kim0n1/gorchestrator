@@ -5,6 +5,7 @@ import {
   SandboxConfig,
   SandboxState,
 } from '../types/index.js';
+import { coreLogger } from './observability.js';
 
 /**
  * Sandbox Pool Manager
@@ -209,11 +210,17 @@ export class SandboxPoolManager {
           ]);
         } catch (error) {
           // If domain-based rule fails, log but continue
-          console.warn(`[SandboxPoolManager] Could not add rule for domain ${domain}:`, error);
+          coreLogger.warn('Could not add sandbox network rule for domain', {
+            domain,
+            error: error instanceof Error ? error.message : String(error),
+          });
         }
       }
     } catch (error) {
-      console.error(`[SandboxPoolManager] Failed to apply network restrictions for ${containerName}:`, error);
+      coreLogger.error('Failed to apply sandbox network restrictions', {
+        containerName,
+        error: error instanceof Error ? error.message : String(error),
+      });
       // Don't fail the whole sandbox provisioning if network restrictions fail
     }
   }
@@ -222,14 +229,14 @@ export class SandboxPoolManager {
    * Provision an E2B sandbox
    */
   private async provisionE2BSandbox(sandbox: Sandbox): Promise<void> {
-    console.log('[SandboxPoolManager] E2B backend requires additional setup - see TESTING.md for implementation guidance');
+    coreLogger.info('E2B backend requires additional setup - see TESTING.md for implementation guidance');
   }
 
   /**
    * Provision a Modal sandbox
    */
   private async provisionModalSandbox(sandbox: Sandbox): Promise<void> {
-    console.log('[SandboxPoolManager] Modal backend requires additional setup - see TESTING.md for implementation guidance');
+    coreLogger.info('Modal backend requires additional setup - see TESTING.md for implementation guidance');
   }
 
   /**
@@ -484,7 +491,10 @@ export class SandboxPoolManager {
           break;
       }
     } catch (error) {
-      console.error(`[SandboxPoolManager] Error destroying sandbox ${sandboxId}:`, error);
+      coreLogger.error('Error destroying sandbox', {
+        sandboxId,
+        error: error instanceof Error ? error.message : String(error),
+      });
     } finally {
       this.activeSandboxes.delete(sandboxId);
       this.processQueue();
@@ -526,7 +536,10 @@ export class SandboxPoolManager {
         this.createSandbox(next.attemptId, next.config)
           .then(next.resolve)
           .catch((error) => {
-            console.error(`[SandboxPoolManager] Failed to provision sandbox for ${next.attemptId}:`, error);
+            coreLogger.error('Failed to provision sandbox', {
+              attemptId: next.attemptId,
+              error: error instanceof Error ? error.message : String(error),
+            });
             // Create failed sandbox to allow caller to handle error
             const failedSandbox: Sandbox = {
               sandbox_id: uuidv4(),

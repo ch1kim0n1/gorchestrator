@@ -32,9 +32,8 @@ import { LLMClient } from './llm-client.js';
 import { BudgetLedger } from './budget-ledger.js';
 import { DriftDetector } from '../../../shared/src/core/drift-detector.js';
 import { LatencyTracker } from '../../../shared/src/core/latency-tracker.js';
-import { AuditLogger } from '../../../shared/src/core/audit-logger.js';
 import { HealthCheckResult } from '../../../shared/src/health/health-checker.js';
-import { StructuredLogger } from '../../../shared/src/observability/structured-logger.js';
+import { GOrchestratorObservability, LocalAuditLogger, LocalLogger } from './observability.js';
 import {
   GBrainClient,
   GBrainClientConfig,
@@ -83,8 +82,9 @@ export class GOrchestrator {
   private costLedgerReady: Promise<void>;
   private llmClient: LLMClient;
   private latencyTracker: LatencyTracker;
-  private auditLogger: AuditLogger;
-  private logger: StructuredLogger;
+  private auditLogger: LocalAuditLogger;
+  private logger: LocalLogger;
+  private observability: GOrchestratorObservability;
 
   constructor(config: {
     gbrainEndpoint?: string;
@@ -104,7 +104,9 @@ export class GOrchestrator {
     this.successRateHistoryPath = path.join(process.cwd(), '.gbrain-corpus', 'gorchestrator-success-rate-history.json');
     this.successRateHistory = this.loadSuccessRateHistory();
     this.persistence = new OrchestratorPersistenceManager(config.dbPath);
-    this.logger = new StructuredLogger('gorchestrator');
+    this.observability = new GOrchestratorObservability('gorchestrator');
+    this.auditLogger = this.observability.audit;
+    this.logger = this.observability.logger;
     
     const gbrainEndpoint = process.env.GBRAIN_ENDPOINT || this.gbrainEndpoint;
     this.gbrainClient = new GBrainClient({
@@ -203,7 +205,6 @@ export class GOrchestrator {
       alert_threshold: 0.3,
     });
     this.latencyTracker = new LatencyTracker(1000);
-    this.auditLogger = new AuditLogger('gorchestrator');
   }
 
   /**
@@ -211,6 +212,31 @@ export class GOrchestrator {
    */
   getLatencyMetrics() {
     return this.latencyTracker.getMetrics();
+  }
+
+  exportPrometheusMetrics(): string {
+    return this.observability.metrics.prometheus();
+  }
+
+  exportOpenTelemetryMetrics(): Record<string, unknown> {
+    return this.observability.metrics.openTelemetry();
+  }
+
+  getObservabilitySnapshot(): Record<string, unknown> {
+    return this.observability.snapshot();
+  }
+
+  logShellJob(entry: {
+    command: string;
+    cwd?: string;
+    exit_code?: number;
+    duration_ms?: number;
+    correlation_id?: string;
+    trace_id?: string;
+    metadata?: Record<string, unknown>;
+    error?: string;
+  }): void {
+    this.auditLogger.logShellJob(entry);
   }
 
   private async recordLLMSpend(
@@ -256,165 +282,198 @@ export class GOrchestrator {
   }): Promise<OrchestratorRunRecord> {
     const start = performance.now();
     const startTime = Date.now();
+    const span = this.observability.tracer.startSpan('GOrchestrator.runTask', {
+      task_type: rawTask.taskType,
+      priority: rawTask.priority || 'normal',
+      attempts: rawTask.n,
+    }, String((rawTask as any).traceparent || rawTask.userContext || ''));
     let currentTier = this.multiModelConfig.default_tier;
     let escalated = false;
 
-    // Update metrics
-    this.escalationMetrics.total_tasks++;
-    this.escalationMetrics.tier1_count++;
+    try {
+      // Update metrics
+      this.escalationMetrics.total_tasks++;
+      this.escalationMetrics.tier1_count++;
 
-    // Phase 1: Intake & Priming
-    this.logger.info('Phase 1: Intake & Priming (Tier 1)');
-    const taskBundle = await this.intakePrimer.intakeTask(rawTask);
+      // Phase 1: Intake & Priming
+      this.logger.info('Phase 1: Intake & Priming (Tier 1)');
+      const taskBundle = await this.intakePrimer.intakeTask(rawTask);
 
-    // Phase 2: Configuration Sampling
-    this.logger.info('Phase 2: Configuration Sampling (Tier 1)');
-    const samplingStartTime = Date.now();
-    const samplingPlan = await this.configSampler.sampleConfigurations(
-      taskBundle,
-      rawTask.n
-    );
-    const samplingDuration = Date.now() - samplingStartTime;
-    this.escalationMetrics.tier1_avg_latency_ms = samplingDuration;
-
-    // Phase 3: Parallel Execution
-    this.logger.info('Phase 3: Parallel Execution');
-    const attemptResults = await this.runParallelAttempts(
-      taskBundle,
-      samplingPlan.configs
-    );
-
-    // Phase 4: Scoring (if verification enabled)
-    let scoredAttempts: ScoredAttempt[] = [];
-    if (rawTask.verify !== false) {
-      this.logger.info('Phase 4: Scoring via GMirror (with escalation check)');
-      scoredAttempts = await this.scoreAttemptsWithEscalation(
+      // Phase 2: Configuration Sampling
+      this.logger.info('Phase 2: Configuration Sampling (Tier 1)');
+      const samplingStartTime = Date.now();
+      const samplingPlan = await this.configSampler.sampleConfigurations(
         taskBundle,
-        attemptResults,
-        rawTask.priority || 'normal'
+        rawTask.n
       );
-      
-      // Track escalation
-      if (escalated) {
-        this.escalationMetrics.escalated_tasks++;
-        this.escalationMetrics.tier2_count++;
-      }
-      
-      // Enforce cost hard gate
-      const maxBudget = taskBundle.budget.max_cost_usd;
-      scoredAttempts = scoredAttempts.map(attempt => {
-        const costCheck = attempt.cost.total_cost_usd > maxBudget;
-        return {
-          ...attempt,
+      const samplingDuration = Date.now() - samplingStartTime;
+      this.escalationMetrics.tier1_avg_latency_ms = samplingDuration;
+
+      // Phase 3: Parallel Execution
+      this.logger.info('Phase 3: Parallel Execution');
+      const attemptResults = await this.runParallelAttempts(
+        taskBundle,
+        samplingPlan.configs
+      );
+
+      // Phase 4: Scoring (if verification enabled)
+      let scoredAttempts: ScoredAttempt[] = [];
+      if (rawTask.verify !== false) {
+        this.logger.info('Phase 4: Scoring via GMirror (with escalation check)');
+        scoredAttempts = await this.scoreAttemptsWithEscalation(
+          taskBundle,
+          attemptResults,
+          rawTask.priority || 'normal'
+        );
+
+        // Track escalation
+        if (escalated) {
+          this.escalationMetrics.escalated_tasks++;
+          this.escalationMetrics.tier2_count++;
+        }
+
+        // Enforce cost hard gate
+        const maxBudget = taskBundle.budget.max_cost_usd;
+        scoredAttempts = scoredAttempts.map(attempt => {
+          const costCheck = attempt.cost.total_cost_usd > maxBudget;
+          return {
+            ...attempt,
+            scores: {
+              ...attempt.scores,
+              hard_gates_passed: attempt.scores.hard_gates_passed && !costCheck,
+            },
+          };
+        });
+      } else {
+        // Skip scoring, mark all as selected
+        scoredAttempts = attemptResults.map((a, idx) => ({
+          ...a,
           scores: {
-            ...attempt.scores,
-            hard_gates_passed: attempt.scores.hard_gates_passed && !costCheck,
+            correctness: { score: 0.5, confidence: 0.5, evidence: [] },
+            user_outcome: { score: 0.5, confidence: 0.5, evidence: [] },
+            robustness: { score: 0.5, confidence: 0.5, evidence: [] },
+            risk: { score: 0.5, confidence: 0.5, evidence: [] },
+            overall_score: 0.5,
+            hard_gates_passed: true,
           },
-        };
-      });
-    } else {
-      // Skip scoring, mark all as selected
-      scoredAttempts = attemptResults.map((a, idx) => ({
+          selected: idx === 0,
+          selection_reason: 'First completed attempt (verification disabled)',
+        }));
+      }
+
+      // Phase 5: Selection
+      this.logger.info('Phase 5: Selection');
+      const selectionResult = await this.selectorEngine.selectWinner(scoredAttempts);
+
+      // Mark winner in attempts
+      scoredAttempts = scoredAttempts.map(a => ({
         ...a,
-        scores: {
-          correctness: { score: 0.5, confidence: 0.5, evidence: [] },
-          user_outcome: { score: 0.5, confidence: 0.5, evidence: [] },
-          robustness: { score: 0.5, confidence: 0.5, evidence: [] },
-          risk: { score: 0.5, confidence: 0.5, evidence: [] },
-          overall_score: 0.5,
-          hard_gates_passed: true,
-        },
-        selected: idx === 0,
-        selection_reason: 'First completed attempt (verification disabled)',
+        selected: a.attempt_id === selectionResult.winner_attempt_id,
+        selection_reason: a.attempt_id === selectionResult.winner_attempt_id
+          ? selectionResult.rationale
+          : undefined,
       }));
+
+      // Phase 6: Cognitive Check (if enabled)
+      if (rawTask.cognitiveCheck) {
+        this.logger.info('Phase 6: Cognitive Check via GToM');
+        await this.performCognitiveCheck(taskBundle, scoredAttempts);
+      }
+
+      // Phase 7: Persistence
+      this.logger.info('Phase 7: Persistence to GBrain');
+      const runRecord: OrchestratorRunRecord = {
+        task_id: taskBundle.task_id,
+        task_bundle: taskBundle,
+        attempts: scoredAttempts,
+        winner: selectionResult.winner_attempt_id,
+        merged_output: selectionResult.merge_sources ? selectionResult.selected_deliverable : undefined,
+        total_cost: this.aggregateCosts(scoredAttempts),
+        total_wall_time_ms: Date.now() - startTime,
+        gbrain_write_status: 'pending',
+        created_at: new Date(startTime).toISOString(),
+        completed_at: new Date().toISOString(),
+      };
+
+      this.persistence.addRunArtifacts({
+        attempts: attemptResults.map(attempt => ({
+          attempt_id: attempt.attempt_id,
+          task_id: taskBundle.task_id,
+          config_id: attempt.config_id,
+          status: attempt.status,
+          deliverable: attempt.deliverable?.content,
+          error_message: attempt.error_message,
+          wall_time_ms: attempt.wall_time_ms,
+          cost_usd: attempt.cost.total_cost_usd,
+        })),
+        scoredAttempts: scoredAttempts.map(scored => ({
+          attempt_id: scored.attempt_id,
+          task_id: taskBundle.task_id,
+          overall_score: scored.scores.overall_score,
+          correctness_score: scored.scores.correctness?.score,
+          efficiency_score: scored.scores.robustness?.score,
+          completeness_score: scored.scores.user_outcome?.score,
+          hard_gates_passed: scored.scores.hard_gates_passed,
+        })),
+        taskRun: {
+          task_id: taskBundle.task_id,
+          description: taskBundle.raw_description,
+          total_attempts: scoredAttempts.length,
+          successful_attempts: scoredAttempts.filter(attempt => attempt.status === 'completed').length,
+          total_cost_usd: runRecord.total_cost.total_cost_usd,
+          total_duration_ms: runRecord.total_wall_time_ms,
+          winner_attempt_id: selectionResult.winner_attempt_id,
+        },
+      });
+
+      await this.persistRunRecord(runRecord);
+
+      // Generate and emit execution receipt
+      const receipt = await this.generateReceipt(taskBundle, runRecord);
+      await this.receiptRegistry.append(receipt);
+      (runRecord as any).execution_receipt = receipt;
+
+      // Store receipt in gbrain for quality control
+      await this.storeReceiptInGBrain(receipt);
+
+      // Track success rate for drift detection
+      const successRate = scoredAttempts.filter(a => a.status === 'completed').length / scoredAttempts.length;
+      this.successRateHistory.push(successRate);
+      if (this.successRateHistory.length > 50) this.successRateHistory.shift();
+      this.saveSuccessRateHistory();
+
+      // Cleanup
+      await this.sandboxManager.cleanup();
+
+      const latencyMs = performance.now() - start;
+      this.latencyTracker.record(latencyMs);
+      this.observability.metrics.recordPublicMethod('runTask', latencyMs, 'ok');
+      this.auditLogger.logDecision({
+        operation: 'runTask',
+        decision: runRecord.winner ? 'winner_selected' : 'no_winner',
+        correlation_id: runRecord.task_id,
+        trace_id: span.trace_id,
+        success: true,
+        latency_ms: latencyMs,
+        cost_usd: runRecord.total_cost.total_cost_usd,
+        metadata: { attempts: scoredAttempts.length, gbrain_write_status: runRecord.gbrain_write_status },
+      });
+      this.observability.tracer.endSpan(span);
+      return runRecord;
+    } catch (error) {
+      const latencyMs = performance.now() - start;
+      this.observability.metrics.recordPublicMethod('runTask', latencyMs, 'error');
+      this.auditLogger.logDecision({
+        operation: 'runTask',
+        decision: 'error',
+        trace_id: span.trace_id,
+        success: false,
+        latency_ms: latencyMs,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      this.observability.tracer.endSpan(span, error instanceof Error ? error : new Error(String(error)));
+      throw error;
     }
-
-    // Phase 5: Selection
-    this.logger.info('Phase 5: Selection');
-    const selectionResult = await this.selectorEngine.selectWinner(scoredAttempts);
-    
-    // Mark winner in attempts
-    scoredAttempts = scoredAttempts.map(a => ({
-      ...a,
-      selected: a.attempt_id === selectionResult.winner_attempt_id,
-      selection_reason: a.attempt_id === selectionResult.winner_attempt_id 
-        ? selectionResult.rationale 
-        : undefined,
-    }));
-
-    // Phase 6: Cognitive Check (if enabled)
-    if (rawTask.cognitiveCheck) {
-      this.logger.info('Phase 6: Cognitive Check via GToM');
-      await this.performCognitiveCheck(taskBundle, scoredAttempts);
-    }
-
-    // Phase 7: Persistence
-    this.logger.info('Phase 7: Persistence to GBrain');
-    const runRecord: OrchestratorRunRecord = {
-      task_id: taskBundle.task_id,
-      task_bundle: taskBundle,
-      attempts: scoredAttempts,
-      winner: selectionResult.winner_attempt_id,
-      merged_output: selectionResult.merge_sources ? selectionResult.selected_deliverable : undefined,
-      total_cost: this.aggregateCosts(scoredAttempts),
-      total_wall_time_ms: Date.now() - startTime,
-      gbrain_write_status: 'pending',
-      created_at: new Date(startTime).toISOString(),
-      completed_at: new Date().toISOString(),
-    };
-
-    this.persistence.addRunArtifacts({
-      attempts: attemptResults.map(attempt => ({
-        attempt_id: attempt.attempt_id,
-        task_id: taskBundle.task_id,
-        config_id: attempt.config_id,
-        status: attempt.status,
-        deliverable: attempt.deliverable?.content,
-        error_message: attempt.error_message,
-        wall_time_ms: attempt.wall_time_ms,
-        cost_usd: attempt.cost.total_cost_usd,
-      })),
-      scoredAttempts: scoredAttempts.map(scored => ({
-        attempt_id: scored.attempt_id,
-        task_id: taskBundle.task_id,
-        overall_score: scored.scores.overall_score,
-        correctness_score: scored.scores.correctness?.score,
-        efficiency_score: scored.scores.robustness?.score,
-        completeness_score: scored.scores.user_outcome?.score,
-        hard_gates_passed: scored.scores.hard_gates_passed,
-      })),
-      taskRun: {
-        task_id: taskBundle.task_id,
-        description: taskBundle.raw_description,
-        total_attempts: scoredAttempts.length,
-        successful_attempts: scoredAttempts.filter(attempt => attempt.status === 'completed').length,
-        total_cost_usd: runRecord.total_cost.total_cost_usd,
-        total_duration_ms: runRecord.total_wall_time_ms,
-        winner_attempt_id: selectionResult.winner_attempt_id,
-      },
-    });
-
-    await this.persistRunRecord(runRecord);
-
-    // Generate and emit execution receipt
-    const receipt = await this.generateReceipt(taskBundle, runRecord);
-    await this.receiptRegistry.append(receipt);
-    (runRecord as any).execution_receipt = receipt;
-
-    // Store receipt in gbrain for quality control
-    await this.storeReceiptInGBrain(receipt);
-
-    // Track success rate for drift detection
-    const successRate = scoredAttempts.filter(a => a.status === 'completed').length / scoredAttempts.length;
-    this.successRateHistory.push(successRate);
-    if (this.successRateHistory.length > 50) this.successRateHistory.shift();
-    this.saveSuccessRateHistory();
-
-    // Cleanup
-    await this.sandboxManager.cleanup();
-
-    this.latencyTracker.record(performance.now() - start);
-    return runRecord;
   }
 
   /**
@@ -667,7 +726,9 @@ export class GOrchestrator {
         selected: false,
       }));
     } catch (error) {
-      console.warn('[GOrchestrator] GMirror scoring failed, using fallback:', error);
+      this.logger.warn('GMirror scoring failed, using fallback', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       return attempts.map(attempt => ({
         ...attempt,
         scores: this.fallbackScore(),
@@ -779,35 +840,51 @@ export class GOrchestrator {
    */
   async healthCheck(): Promise<OrchestratorHealthStatus> {
     const start = performance.now();
-    const results = await Promise.all([
-      this.checkHttpEndpoint('gbrain', this.gbrainEndpoint),
-      this.checkHttpEndpoint('gmirror', this.gmirrorEndpoint),
-      this.checkHttpEndpoint('gtom', this.gtomEndpoint),
-      this.checkHttpEndpoint('gstack', this.gstackEndpoint),
-      this.checkLLMApiHealth(),
-      this.checkSandboxHealth(),
-      this.checkSyncFreshness(),
-      this.checkSchemaVersion(),
-      this.checkQueueHealth(),
-      this.checkHealthTrend(),
-      this.checkEvalCaptureFailures(),
-    ]);
+    const span = this.observability.tracer.startSpan('GOrchestrator.healthCheck');
+    try {
+      const results = await Promise.all([
+        this.checkHttpEndpoint('gbrain', this.gbrainEndpoint),
+        this.checkHttpEndpoint('gmirror', this.gmirrorEndpoint),
+        this.checkHttpEndpoint('gtom', this.gtomEndpoint),
+        this.checkHttpEndpoint('gstack', this.gstackEndpoint),
+        this.checkLLMApiHealth(),
+        this.checkSandboxHealth(),
+        this.checkSyncFreshness(),
+        this.checkSchemaVersion(),
+        this.checkQueueHealth(),
+        this.checkHealthTrend(),
+        this.checkEvalCaptureFailures(),
+      ]);
 
-    const healthScore = this.calculateHealthScore(results);
-    results.push({
-      service: 'health_score',
-      healthy: healthScore >= 80,
-      latency_ms: performance.now() - start,
-      error: healthScore >= 80 ? undefined : `score=${healthScore}`,
-      timestamp: new Date().toISOString(),
-    });
+      const healthScore = this.calculateHealthScore(results);
+      results.push({
+        service: 'health_score',
+        healthy: healthScore >= 80,
+        latency_ms: performance.now() - start,
+        error: healthScore >= 80 ? undefined : `score=${healthScore}`,
+        timestamp: new Date().toISOString(),
+      });
 
-    this.latencyTracker.record(performance.now() - start);
-    const components = Object.fromEntries(
-      results.map((check) => [check.service, check.healthy ? 'ok' : 'error'])
-    ) as Record<string, 'ok' | 'error'>;
-    const status = results.every((check) => check.healthy) ? 'healthy' : 'unhealthy';
-    return { status, components, checks: results };
+      const latencyMs = performance.now() - start;
+      this.latencyTracker.record(latencyMs);
+      this.observability.metrics.recordPublicMethod('healthCheck', latencyMs, 'ok');
+      for (const result of results) {
+        this.observability.metrics.observe('gorchestrator_health_check_latency_ms', result.latency_ms, { service: result.service });
+        if (!result.healthy) this.observability.metrics.increment('gorchestrator_health_check_errors_total', { service: result.service });
+      }
+      await this.observability.alertOnHealthDrop(healthScore, results);
+      const components = Object.fromEntries(
+        results.map((check) => [check.service, check.healthy ? 'ok' : 'error'])
+      ) as Record<string, 'ok' | 'error'>;
+      const status = results.every((check) => check.healthy) ? 'healthy' : 'unhealthy';
+      this.observability.tracer.endSpan(span);
+      return { status, components, checks: results };
+    } catch (error) {
+      const latencyMs = performance.now() - start;
+      this.observability.metrics.recordPublicMethod('healthCheck', latencyMs, 'error');
+      this.observability.tracer.endSpan(span, error instanceof Error ? error : new Error(String(error)));
+      throw error;
+    }
   }
 
   private async checkHttpEndpoint(service: string, endpoint: string): Promise<HealthCheckResult> {
@@ -1336,7 +1413,7 @@ export class GOrchestrator {
    */
   private async storeReceiptInGBrain(receipt: ExecutionReceipt): Promise<void> {
     if (this.isGbrainCircuitOpen()) {
-      console.warn('[GOrchestrator] GBrain circuit breaker is open, skipping storeReceiptInGBrain');
+      this.logger.warn('GBrain circuit breaker is open, skipping storeReceiptInGBrain');
       return;
     }
 
@@ -1352,7 +1429,7 @@ export class GOrchestrator {
     } catch (error) {
       if (error instanceof GBrainClientError) {
         this.handleGbrainError(error);
-        console.error('[GOrchestrator] Failed to store receipt in gbrain:', error);
+        this.logger.error('Failed to store receipt in gbrain', error);
       }
     }
   }
@@ -1382,9 +1459,9 @@ export class GOrchestrator {
     if (error.kind === 'timeout' || error.kind === 'network' || error.kind === 'server_error') {
       this.gbrainCircuitOpen = true;
       this.gbrainCircuitOpenUntil = Date.now() + this.CIRCUIT_BREAKER_TIMEOUT_MS;
-      console.warn('[GOrchestrator] GBrain circuit breaker opened', { 
-        errorKind: error.kind, 
-        openUntil: new Date(this.gbrainCircuitOpenUntil).toISOString() 
+      this.logger.warn('GBrain circuit breaker opened', {
+        errorKind: error.kind,
+        openUntil: new Date(this.gbrainCircuitOpenUntil).toISOString()
       });
     }
   }

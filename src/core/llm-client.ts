@@ -14,6 +14,7 @@ import { encoding_for_model, get_encoding, TiktokenModel } from 'tiktoken';
 import { createLogger } from '../../../shared/src/core/structured-logger.js';
 import * as fs from 'fs';
 import * as path from 'path';
+import { coreLogger } from './observability.js';
 
 export interface ModelPricing {
   /** USD per 1M input tokens. */
@@ -86,7 +87,7 @@ export function estimateCostUsd(
 ): number {
   const pricing = MODEL_PRICING[modelId];
   if (!pricing) {
-    console.warn(`[LLMClient] No pricing for model: ${modelId}`);
+    coreLogger.warn('No pricing for model', { model_id: modelId });
     return 0;
   }
   return (

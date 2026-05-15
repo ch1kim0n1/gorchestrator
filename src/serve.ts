@@ -1,5 +1,6 @@
 import { GOrchestratorMCPServer } from './mcp/server.js';
 import { HealthServer, type HealthCheckResult, type ReadinessCheckResult } from '../../shared/src/core/health-server.js';
+import { coreLogger } from './core/observability.js';
 
 const HEALTH_PORT = process.env.HEALTH_PORT ? parseInt(process.env.HEALTH_PORT, 10) : 8080;
 
@@ -22,7 +23,7 @@ async function main() {
 
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
-    console.log(`Received ${signal}, shutting down gracefully...`);
+    coreLogger.info('Received shutdown signal', { signal });
     await healthServer.shutdown();
     process.exit(0);
   };
@@ -31,16 +32,16 @@ async function main() {
   process.on('SIGINT', () => shutdown('SIGINT'));
 
   healthServer.addShutdownHandler(async () => {
-    console.log('[GOrchestrator] Cleanup complete');
+    coreLogger.info('Cleanup complete');
   });
 
   try {
     await healthServer.start();
     await server.start();
   } catch (error) {
-    console.error('Failed to start GOrchestrator:', error);
+    coreLogger.error('Failed to start GOrchestrator', error instanceof Error ? error : { error: String(error) });
     process.exit(1);
   }
 }
 
-main().catch(console.error);
+main().catch((error) => coreLogger.error('Main function error', error instanceof Error ? error : { error: String(error) }));

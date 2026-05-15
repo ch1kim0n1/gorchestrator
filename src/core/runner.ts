@@ -13,6 +13,7 @@ import {
   LLMClient,
   LLMClientConfig,
 } from './llm-client.js';
+import { coreLogger } from './observability.js';
 
 /**
  * Attempt Runner
@@ -132,7 +133,9 @@ export class AttemptRunner {
       return this.createErrorResult(attemptId, taskBundle, config, sandbox.sandbox_id, errorMessage, startTime, wallTimeMs, traceEvents, totalCost);
     } finally {
       // Cleanup sandbox (in production, might keep for debugging)
-      await this.sandboxManager.destroySandbox(sandbox.sandbox_id).catch(console.error);
+      await this.sandboxManager.destroySandbox(sandbox.sandbox_id).catch((error) => {
+        coreLogger.error('Failed to destroy sandbox after attempt', error instanceof Error ? error : { error: String(error) });
+      });
     }
   }
 
@@ -245,7 +248,7 @@ Return a JSON array of step descriptions, e.g.:
       }
     } catch (e) {
       // If JSON parsing fails, return a default plan
-      console.warn('[AttemptRunner] Failed to parse plan response, using default');
+      coreLogger.warn('Failed to parse plan response, using default');
     }
     return [
       'Analyze task requirements',
@@ -552,7 +555,7 @@ Return a JSON object with the result, e.g.:
       }
     } catch (e) {
       // If JSON parsing fails, return a default response
-      console.warn('[AttemptRunner] Failed to parse subtask response, using default');
+      coreLogger.warn('Failed to parse subtask response, using default');
     }
     return `[Executed: ${subtask}]`;
   }
@@ -609,7 +612,7 @@ Return a JSON array of step objects, e.g.:
       }
     } catch (e) {
       // If JSON parsing fails, return a default plan
-      console.warn('[AttemptRunner] Failed to parse detailed plan response, using default');
+      coreLogger.warn('Failed to parse detailed plan response, using default');
     }
     return [
       { description: 'Initialize workspace', artifact_path: '/workspace/init.txt' },
@@ -671,7 +674,7 @@ Return strict JSON:
         return String(parsed.result);
       }
     } catch (e) {
-      console.warn('[AttemptRunner] Failed to parse execution response, using fallback');
+      coreLogger.warn('Failed to parse execution response, using fallback');
     }
     return `[Executed by LLM fallback: ${label}]`;
   }
@@ -729,7 +732,7 @@ Return a JSON object with the decision, e.g.:
       }
     } catch (e) {
       // If JSON parsing fails, return a default decision
-      console.warn('[AttemptRunner] Failed to parse decision response, using default');
+      coreLogger.warn('Failed to parse decision response, using default');
     }
     if (step >= 5) {
       return { type: 'complete' };

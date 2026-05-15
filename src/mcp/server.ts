@@ -5,6 +5,7 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { GOrchestrator } from '../core/orchestrator.js';
+import { coreLogger } from '../core/observability.js';
 import { createAuthMiddleware, type AuthConfig, type AuthToken } from '../../../shared/src/core/token-auth.js';
 
 type McpScope = 'read' | 'write';
@@ -526,7 +527,7 @@ class GOrchestratorMCPServer {
   async start() {
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
-    console.error('[GOrchestrator MCP Server] Started');
+    coreLogger.info('GOrchestrator MCP Server started');
   }
 }
 
@@ -534,7 +535,9 @@ class GOrchestratorMCPServer {
 // @ts-ignore - CommonJS compatibility
 if (import.meta.url === `file://${process.argv[1]}`) {
   const server = new GOrchestratorMCPServer();
-  server.start().catch(console.error);
+  server.start().catch((error) => coreLogger.error('GOrchestrator MCP Server failed', {
+    error: error instanceof Error ? error.message : String(error),
+  }));
 }
 
 export { GOrchestratorMCPServer };

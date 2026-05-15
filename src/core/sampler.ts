@@ -12,6 +12,7 @@ import {
   GBrainPriorBundle,
 } from '../types/index.js';
 import { LLMClient } from './llm-client.js';
+import { coreLogger } from './observability.js';
 
 /**
  * Configuration Sampler
@@ -672,7 +673,9 @@ Return strict JSON with keys:
       const data = await response.json();
       return data.available_skills || [];
     } catch (error) {
-      console.warn(`[ConfigurationSampler] GStack query failed: ${error instanceof Error ? error.message : String(error)}`);
+      coreLogger.warn('GStack query failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       return [];
     }
   }

@@ -70,6 +70,26 @@ program
     }
   });
 
+program
+  .command('metrics')
+  .description('Export GOrchestrator observability metrics')
+  .option('--format <format>', 'Export format: prometheus, otel, or json', 'prometheus')
+  .option('--json', 'Alias for --format json')
+  .action(async (options) => {
+    const format = options.json ? 'json' : String(options.format || 'prometheus').toLowerCase();
+    const orchestrator = new GOrchestrator();
+    if (format === 'prometheus') {
+      console.log(orchestrator.exportPrometheusMetrics());
+    } else if (format === 'otel') {
+      console.log(JSON.stringify(orchestrator.exportOpenTelemetryMetrics(), null, 2));
+    } else if (format === 'json') {
+      console.log(JSON.stringify(orchestrator.getObservabilitySnapshot(), null, 2));
+    } else {
+      console.error(chalk.red(`Unsupported metrics format: ${format}`));
+      process.exit(1);
+    }
+  });
+
 // Run a task through orchestration
 program
   .command('run')
@@ -942,6 +962,7 @@ function buildCompletionScript(shell: string): string | null {
     'backup',
     'restore',
     'export',
+    'metrics',
     'run',
     'health',
     'replay',

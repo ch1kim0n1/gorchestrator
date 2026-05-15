@@ -11,6 +11,7 @@ import {
   GBrainPrimingRequest,
 } from '../types/index.js';
 import { LLMClient } from './llm-client.js';
+import { coreLogger } from './observability.js';
 
 /**
  * Intake & Priming Module
@@ -54,7 +55,9 @@ export class IntakePrimer {
     
     // Query GBrain for priors (with timeout)
     const priors = await this.queryPriors(signature).catch((error) => {
-      console.warn(`[IntakePrimer] GBrain priming failed: ${error.message}. Proceeding with empty priors.`);
+      coreLogger.warn('GBrain priming failed; proceeding with empty priors', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       return this.emptyPriors();
     });
 
@@ -159,7 +162,9 @@ Return only the category name.`;
       const validTypes = ['code_generation', 'refactor', 'deployment', 'research', 'document_write', 'general'];
       return validTypes.includes(taskType) ? taskType : this.inferTaskTypeHeuristic(description);
     } catch (error) {
-      console.warn('[IntakePrimer] LLM task type inference failed, using heuristic:', error);
+      coreLogger.warn('LLM task type inference failed, using heuristic', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       return this.inferTaskTypeHeuristic(description);
     }
   }
@@ -207,7 +212,9 @@ Return a JSON array of surface names (e.g., ["api", "database"]).`;
       const surfaces = Array.isArray(parsed) ? parsed.filter((s: string) => validSurfaces.includes(s)) : [];
       return surfaces.length > 0 ? surfaces : this.inferSurfacesHeuristic(description);
     } catch (error) {
-      console.warn('[IntakePrimer] LLM surfaces inference failed, using heuristic:', error);
+      coreLogger.warn('LLM surfaces inference failed, using heuristic', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       return this.inferSurfacesHeuristic(description);
     }
   }
