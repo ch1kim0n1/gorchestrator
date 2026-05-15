@@ -153,27 +153,53 @@ program
 // Replay a previous run
 program
   .command('replay')
-  .description('Replay a previous run from corpus')
-  .argument('<hash>', 'Content hash to replay')
+  .description('Replay a previous run from receipt or corpus')
+  .argument('<id>', 'Receipt path, receipt ID, corpus_sha8, or content hash to replay')
   .option('--corpus <path>', 'Path to corpus directory', './.gbrain-corpus')
   .option('--json', 'Output as JSON')
   .option('--quiet', 'Suppress output for CI use')
-  .action(async (hash: string, options: any) => {
+  .action(async (id: string, options: any) => {
     try {
+      const isHash = /^[a-f0-9]{64}$/i.test(id);
+      const isCorpusSha8 = /^[a-f0-9]{8}$/i.test(id);
+      if (!isHash) {
+        const { ReceiptRegistry } = await import('./core/receipt-registry.js');
+        const receiptRegistry = new ReceiptRegistry('gorchestrator');
+        const receipt = isCorpusSha8
+          ? (await receiptRegistry.getByCorpusSha8(id)).at(-1)
+          : await receiptRegistry.getByIdOrPath(id);
+
+        if (!receipt) {
+          console.error(chalk.red(`[GOrchestrator] Receipt not found: ${id}`));
+          process.exit(1);
+        }
+
+        if (options.json) {
+          console.log(JSON.stringify(receipt, null, 2));
+        } else if (!options.quiet) {
+          console.log(chalk.blue.bold(`[GOrchestrator] Replaying receipt: ${receipt.receipt_id}`));
+          console.log(chalk.gray(`Timestamp: ${receipt.timestamp}`));
+          console.log(chalk.gray(`Corpus: ${receipt.metadata?.corpus_sha8 || receipt.input_hash.substring(0, 8)}`));
+          console.log(chalk.gray(`Verdict: ${receipt.verdict}`));
+          console.log(chalk.gray(`Score: ${receipt.overall_score.toFixed(3)}`));
+        }
+        process.exit(0);
+      }
+
       const { ReplayManager } = await import('../../shared/src/core/replay-manager.js');
       const replayManager = new ReplayManager(options.corpus);
       
-      const result = await replayManager.retrieve(hash);
+      const result = await replayManager.retrieve(id);
       
       if (!result.found) {
-        console.error(chalk.red(`[GOrchestrator] Hash not found in corpus: ${hash}`));
+        console.error(chalk.red(`[GOrchestrator] Hash not found in corpus: ${id}`));
         process.exit(1);
       }
 
       if (options.json) {
         console.log(JSON.stringify(result, null, 2));
       } else if (!options.quiet) {
-        console.log(chalk.blue.bold(`[GOrchestrator] Replaying hash: ${hash}`));
+        console.log(chalk.blue.bold(`[GOrchestrator] Replaying hash: ${id}`));
         console.log(chalk.gray(`Tool: ${result.metadata.tool}`));
         console.log(chalk.gray(`Timestamp: ${result.metadata.timestamp}`));
         console.log(chalk.gray(`Task: ${result.metadata.task || 'N/A'}`));
@@ -216,13 +242,20 @@ program
 program
   .command('eval')
   .description('Run evaluation on a test corpus')
+  .argument('[mode]', 'Optional mode, e.g. regress')
   .option('-c, --corpus <path>', 'Path to test corpus JSON')
+  .option('--against <receipt>', 'Receipt path or ID to compare against in regress mode')
   .option('--cycles <number>', 'Number of cycles to run', '1')
   .option('--gbrain <url>', 'GBrain endpoint', 'http://localhost:3000')
   .option('-o, --output <path>', 'Write output to file (JSON format)')
   .option('--json', 'Output as JSON to stdout')
   .option('--quiet', 'Suppress output for CI use')
-  .action(async (options: any) => {
+  .action(async (mode: string | undefined, options: any) => {
+    if (mode === 'regress') {
+      await runReceiptRegression(options.against, options);
+      return;
+    }
+
     const cycles = parseInt(options.cycles);
     const result = {
       cycles,
@@ -241,6 +274,76 @@ program
     process.exit(0);
   });
 
+program
+  .command('receipts')
+  .description('List execution receipts')
+  .option('--since <date>', 'Only include receipts since YYYY-MM-DD')
+  .option('--until <date>', 'Only include receipts up to YYYY-MM-DD')
+  .option('--limit <n>', 'Maximum number of receipts to print', '50')
+  .option('--json', 'Output as JSON')
+  .action(async (options: any) => {
+    try {
+      const { ReceiptRegistry } = await import('./core/receipt-registry.js');
+      const receiptRegistry = new ReceiptRegistry('gorchestrator');
+      const start = options.since ? new Date(options.since) : new Date(0);
+      const end = options.until ? new Date(options.until) : new Date();
+      if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+        console.error(chalk.red('[GOrchestrator] --since/--until must be valid dates'));
+        process.exit(1);
+      }
+
+      const limit = parseInt(options.limit);
+      if (isNaN(limit) || limit < 1) {
+        console.error(chalk.red('[GOrchestrator] --limit must be a positive integer'));
+        process.exit(1);
+      }
+
+      const receipts = (await receiptRegistry.getAllBetween(start, end)).slice(-limit);
+      if (options.json) {
+        console.log(JSON.stringify(receipts, null, 2));
+      } else {
+        for (const receipt of receipts) {
+          console.log(`${receipt.timestamp} ${receipt.receipt_id} ${receipt.verdict} score=${receipt.overall_score.toFixed(3)} corpus=${receipt.metadata?.corpus_sha8 || receipt.input_hash.substring(0, 8)}`);
+        }
+      }
+      process.exit(0);
+    } catch (error) {
+      console.error(chalk.red('[GOrchestrator] Receipt query failed:'), error);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('diff <receiptA> <receiptB>')
+  .description('Diff two execution receipts')
+  .option('--json', 'Output as JSON')
+  .action(async (receiptA: string, receiptB: string, options: any) => {
+    try {
+      const { ReceiptRegistry } = await import('./core/receipt-registry.js');
+      const receiptRegistry = new ReceiptRegistry('gorchestrator');
+      const a = await receiptRegistry.getByIdOrPath(receiptA);
+      const b = await receiptRegistry.getByIdOrPath(receiptB);
+      if (!a || !b) {
+        console.error(chalk.red('[GOrchestrator] Both receipts must exist'));
+        process.exit(1);
+      }
+
+      const diff = receiptRegistry.diff(a, b);
+      if (options.json) {
+        console.log(JSON.stringify(diff, null, 2));
+      } else {
+        console.log(chalk.blue.bold('[GOrchestrator] Receipt Diff'));
+        console.log(`  Verdict: ${diff.verdict.from} -> ${diff.verdict.to}`);
+        console.log(`  Overall score: ${diff.overall_score.from} -> ${diff.overall_score.to} (${diff.overall_score.delta >= 0 ? '+' : ''}${diff.overall_score.delta.toFixed(3)})`);
+        console.log(`  Cost: $${diff.cost_usd.from.toFixed(4)} -> $${diff.cost_usd.to.toFixed(4)} (${diff.cost_usd.delta >= 0 ? '+' : ''}${diff.cost_usd.delta.toFixed(4)})`);
+      }
+      process.exit(0);
+    } catch (error) {
+      console.error(chalk.red('[GOrchestrator] Receipt diff failed:'), error);
+      process.exit(1);
+    }
+  });
+
 // Regress command
 program
   .command('regress')
@@ -249,10 +352,16 @@ program
   .option('-c, --corpus <path>', 'Path to test corpus JSON')
   .option('--gbrain <url>', 'GBrain endpoint', 'http://localhost:3000')
   .option('--tolerance <number>', 'Tolerance for regression detection', '0.05')
+  .option('--against <receipt>', 'Compare latest receipt against a baseline receipt path or ID')
   .option('--json', 'Output as JSON')
   .option('--quiet', 'Suppress output for CI use')
   .action(async (options: any) => {
     try {
+      if (options.against) {
+        await runReceiptRegression(options.against, options);
+        return;
+      }
+
       const tolerance = parseFloat(options.tolerance);
       if (isNaN(tolerance) || tolerance < 0 || tolerance > 1) {
         console.error(chalk.red('[GOrchestrator] --tolerance must be a number between 0 and 1'));
@@ -623,5 +732,50 @@ program
       process.exit(1);
     }
   });
+
+async function runReceiptRegression(against: string | undefined, options: any): Promise<void> {
+  if (!against) {
+    console.error(chalk.red('[GOrchestrator] --against is required for receipt regression'));
+    process.exit(1);
+  }
+
+  const { ReceiptRegistry } = await import('./core/receipt-registry.js');
+  const receiptRegistry = new ReceiptRegistry('gorchestrator');
+  const baseline = await receiptRegistry.getByIdOrPath(against);
+  const latest = await receiptRegistry.getLatest();
+
+  if (!baseline || !latest) {
+    console.error(chalk.red('[GOrchestrator] Baseline and latest receipts must both exist'));
+    process.exit(1);
+  }
+
+  const diff = receiptRegistry.diff(baseline, latest);
+  const regressionPassed =
+    latest.overall_score >= baseline.overall_score &&
+    latest.hard_gates_passed &&
+    latest.verdict !== 'fail';
+
+  const result = {
+    passed: regressionPassed,
+    baseline_receipt: baseline.receipt_id,
+    current_receipt: latest.receipt_id,
+    baseline_score: baseline.overall_score,
+    current_score: latest.overall_score,
+    delta: latest.overall_score - baseline.overall_score,
+    diff,
+  };
+
+  if (options.json) {
+    console.log(JSON.stringify(result, null, 2));
+  } else if (!options.quiet) {
+    console.log(chalk.blue.bold('[GOrchestrator] Receipt Regression Check'));
+    console.log(`  Status: ${regressionPassed ? chalk.green('PASSED') : chalk.red('FAILED')}`);
+    console.log(`  Baseline: ${baseline.receipt_id} (${baseline.overall_score.toFixed(3)})`);
+    console.log(`  Current: ${latest.receipt_id} (${latest.overall_score.toFixed(3)})`);
+    console.log(`  Delta: ${result.delta >= 0 ? chalk.green(`+${result.delta.toFixed(3)}`) : chalk.red(result.delta.toFixed(3))}`);
+  }
+
+  process.exit(regressionPassed ? 0 : 1);
+}
 
 program.parse();
