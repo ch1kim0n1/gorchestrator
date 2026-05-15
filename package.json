@@ -21,6 +21,7 @@
     "check:mcp-contract": "node scripts/quality-gates.js mcp-contract",
     "check:all": "node scripts/quality-gates.js all",
     "smoke": "node scripts/quality-gates.js smoke",
+    "docs:api": "npx typedoc --options typedoc.json",
     "eval:record": "node scripts/eval-tools.js record",
     "eval:list": "node scripts/eval-tools.js list",
     "eval:summary": "node scripts/eval-tools.js summary",

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Documentation set covering migrations, TypeDoc API generation, MCP contract, evaluation baselines, runbook operations, troubleshooting, security model, data flow, integration guidance, and ADRs.
+- `docs:api` script and `typedoc.json` entrypoint configuration for generated API documentation.
+
 ### Changed
 - Improved sandbox lifecycle management
 - Enhanced scoring and selection algorithms

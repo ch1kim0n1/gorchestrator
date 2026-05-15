@@ -1,0 +1,16 @@
+{
+  "entryPoints": [
+    "src/core/orchestrator.ts",
+    "src/core/intake.ts",
+    "src/core/sampler.ts",
+    "src/core/sandbox.ts",
+    "src/core/selector.ts",
+    "src/core/observability.ts",
+    "src/types/index.ts"
+  ],
+  "out": "docs/api",
+  "readme": "docs/API.md",
+  "excludePrivate": true,
+  "excludeProtected": true,
+  "hideGenerator": true
+}

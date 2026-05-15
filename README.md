@@ -10,6 +10,7 @@ The crew boss of the G-Stack. GOrchestrator turns a single task into N parallel 
 - **Scoring and selection pipeline**: Evaluate outputs via GMirror and select the best result
 - **Memory persistence**: Record full attempt histories (winners and losers) to GBrain for learning
 - **Replay capability**: Rerun or vary configurations based on stored attempt histories
+- **Production observability**: Export Prometheus and OpenTelemetry metrics, decision audit logs, shell-job audit logs, and Grafana dashboards
 
 ## Core Thesis
 
@@ -45,9 +46,13 @@ gorchestrator history
 |---------|-------------|
 | `run <task>` | Execute task with parallel attempts |
 | `health` | Check system status and dependencies |
-| `history` | View recent run records |
+| `attempts` | View recent attempt records |
 | `replay <run-id>` | Replay a previous run with variations |
-| `config` | Manage configuration |
+| `receipts` | Query execution receipts |
+| `drift` | Check drift detector output |
+| `cost` | Inspect budget ledger spend |
+| `metrics` | Export Prometheus, OpenTelemetry, or JSON observability data |
+| `backup`, `restore`, `export` | Operate on persisted state |
 
 ## Configuration
 
@@ -138,9 +143,32 @@ npm run typecheck
 # Full verification
 npm run verify
 
+# Generate TypeDoc API docs
+npm run docs:api
+
 # Watch mode
 npm run dev
 ```
+
+## Documentation
+
+| Document | Purpose |
+| --- | --- |
+| `CLAUDE.md` | Agent-readable runtime contract |
+| `ARCHITECTURE.md` | System overview and component responsibilities |
+| `MIGRATIONS.md` | Database migration and rollback policy |
+| `OPERATIONS.md` | Deployment and operational procedures |
+| `TESTING.md` | Test strategy and local verification |
+| `SECURITY.md` | Security reporting and baseline policy |
+| `docs/API.md` | TypeDoc entrypoints and public API summary |
+| `docs/MCP_CONTRACT.md` | MCP tool contract |
+| `docs/EVAL_BASELINE.md` | Evaluation baseline policy |
+| `docs/RUNBOOK.md` | Common operator tasks |
+| `docs/TROUBLESHOOTING.md` | Failure diagnosis |
+| `docs/SECURITY_MODEL.md` | Trust boundaries and controls |
+| `docs/DATA_FLOW.md` | Mermaid data-flow diagram |
+| `docs/INTEGRATION.md` | CLI, MCP, library, and observability integration |
+| `docs/adr/` | Architecture Decision Records |
 
 ## Testing
 
