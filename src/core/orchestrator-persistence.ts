@@ -10,15 +10,21 @@ import * as fs from 'fs';
 export class OrchestratorPersistenceManager {
   private db: any;
   private dbPath: string;
-  private readonly SCHEMA_VERSION = 1;
+  private readonly SCHEMA_VERSION = 2;
+  private backupDir: string;
+  private backupRetentionCount: number;
 
   constructor(dbPath?: string) {
-    const dataDir = dbPath || path.join(process.cwd(), '.gorchestrator', 'data');
-    this.dbPath = path.join(dataDir, 'orchestrator.db');
+    this.dbPath = dbPath || process.env.GORCHESTRATOR_DB_PATH || path.join(process.cwd(), '.gorchestrator', 'data', 'orchestrator.db');
+    const dataDir = path.dirname(this.dbPath);
+    this.backupDir = process.env.GORCHESTRATOR_BACKUP_DIR || path.join(dataDir, 'backups');
+    this.backupRetentionCount = Math.max(1, Number(process.env.GORCHESTRATOR_BACKUP_RETENTION || '10'));
     try {
       const Database = require('better-sqlite3');
       fs.mkdirSync(dataDir, { recursive: true });
       this.db = new Database(this.dbPath);
+      this.db.pragma('journal_mode = WAL');
+      this.db.pragma('foreign_keys = ON');
       this.initializeSchema();
     } catch (error) {
       throw new Error(`Persistence initialization failed: ${error}. Persistence is REQUIRED for GOrchestrator.`);
@@ -33,74 +39,24 @@ export class OrchestratorPersistenceManager {
         applied_at TEXT NOT NULL
       )
     `);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS migrations (
+        version INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        applied_at TEXT NOT NULL
+      )
+    `);
 
-    // Check current schema version
     const row = this.db.prepare('SELECT version FROM schema_version').get() as { version: number } | undefined;
     const currentVersion = row?.version || 0;
-
     if (currentVersion < this.SCHEMA_VERSION) {
       this.runMigrations(currentVersion);
     }
 
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS attempt_results (
-        attempt_id TEXT PRIMARY KEY,
-        task_id TEXT NOT NULL,
-        agent_config_id TEXT NOT NULL,
-        status TEXT NOT NULL,
-        output TEXT,
-        error TEXT,
-        duration_ms INTEGER NOT NULL,
-        cost_usd REAL NOT NULL,
-        timestamp TEXT NOT NULL
-      )
-    `);
-
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS scored_attempts (
-        attempt_id TEXT PRIMARY KEY,
-        task_id TEXT NOT NULL,
-        overall_score REAL NOT NULL,
-        correctness_score REAL,
-        efficiency_score REAL,
-        completeness_score REAL,
-        hard_gates_passed INTEGER NOT NULL,
-        timestamp TEXT NOT NULL,
-        FOREIGN KEY (attempt_id) REFERENCES attempt_results(attempt_id)
-      )
-    `);
-
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS task_runs (
-        task_id TEXT PRIMARY KEY,
-        description TEXT NOT NULL,
-        total_attempts INTEGER NOT NULL,
-        successful_attempts INTEGER NOT NULL,
-        total_cost_usd REAL NOT NULL,
-        total_duration_ms REAL NOT NULL,
-        winner_attempt_id TEXT,
-        timestamp TEXT NOT NULL
-      )
-    `);
-
-    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_attempt_results_task ON attempt_results(task_id, timestamp)`);
-    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_attempt_results_timestamp ON attempt_results(timestamp)`);
-    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_scored_attempts_task ON scored_attempts(task_id, timestamp)`);
-    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_task_runs_timestamp ON task_runs(timestamp)`);
-
-    // Update schema version
     this.db.prepare('INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, ?)').run(
       this.SCHEMA_VERSION,
       new Date().toISOString()
     );
-  }
-
-  private runMigrations(fromVersion: number): void {
-    // Migration framework - add future migrations here
-    for (let v = fromVersion + 1; v <= this.SCHEMA_VERSION; v++) {
-      console.log(`[OrchestratorPersistenceManager] Running migration to version ${v}`);
-      // Add migration logic here when needed
-    }
   }
 
   addAttemptResult(result: {
@@ -163,6 +119,18 @@ export class OrchestratorPersistenceManager {
       run.total_cost_usd, run.total_duration_ms, run.winner_attempt_id || null,
       new Date().toISOString()
     );
+  }
+
+  addRunArtifacts(run: {
+    attempts: Array<Parameters<OrchestratorPersistenceManager['addAttemptResult']>[0]>;
+    scoredAttempts: Array<Parameters<OrchestratorPersistenceManager['addScoredAttempt']>[0]>;
+    taskRun: Parameters<OrchestratorPersistenceManager['addTaskRun']>[0];
+  }): void {
+    this.transaction(() => {
+      for (const attempt of run.attempts) this.addAttemptResult(attempt);
+      for (const scoredAttempt of run.scoredAttempts) this.addScoredAttempt(scoredAttempt);
+      this.addTaskRun(run.taskRun);
+    });
   }
 
   getAttemptResults(taskId: string, limit: number = 100): Array<{
@@ -229,9 +197,54 @@ export class OrchestratorPersistenceManager {
   }
 
   cleanupOldData(): void {
-    this.db.prepare(`DELETE FROM attempt_results WHERE attempt_id NOT IN (SELECT attempt_id FROM attempt_results ORDER BY timestamp DESC LIMIT 1000)`).run();
-    this.db.prepare(`DELETE FROM scored_attempts WHERE attempt_id NOT IN (SELECT attempt_id FROM scored_attempts ORDER BY timestamp DESC LIMIT 1000)`).run();
-    this.db.prepare(`DELETE FROM task_runs WHERE task_id NOT IN (SELECT task_id FROM task_runs ORDER BY timestamp DESC LIMIT 1000)`).run();
+    this.transaction(() => {
+      this.db.prepare(`DELETE FROM attempt_results WHERE attempt_id NOT IN (SELECT attempt_id FROM attempt_results ORDER BY timestamp DESC LIMIT 1000)`).run();
+      this.db.prepare(`DELETE FROM scored_attempts WHERE attempt_id NOT IN (SELECT attempt_id FROM scored_attempts ORDER BY timestamp DESC LIMIT 1000)`).run();
+      this.db.prepare(`DELETE FROM task_runs WHERE task_id NOT IN (SELECT task_id FROM task_runs ORDER BY timestamp DESC LIMIT 1000)`).run();
+    });
+  }
+
+  transaction<T>(operation: () => T): T {
+    return this.db.transaction(operation)();
+  }
+
+  backup(destinationPath?: string): string {
+    fs.mkdirSync(this.backupDir, { recursive: true });
+    const backupPath = destinationPath || path.join(
+      this.backupDir,
+      `gorchestrator-${new Date().toISOString().replace(/[:.]/g, '-')}.db`
+    );
+    fs.mkdirSync(path.dirname(backupPath), { recursive: true });
+    this.db.pragma('wal_checkpoint(TRUNCATE)');
+    fs.copyFileSync(this.dbPath, backupPath);
+    this.rotateBackups();
+    return backupPath;
+  }
+
+  restore(sourcePath: string): void {
+    if (!fs.existsSync(sourcePath)) {
+      throw new Error(`Backup does not exist: ${sourcePath}`);
+    }
+    this.db.close();
+    fs.copyFileSync(sourcePath, this.dbPath);
+    const Database = require('better-sqlite3');
+    this.db = new Database(this.dbPath);
+    this.db.pragma('journal_mode = WAL');
+    this.db.pragma('foreign_keys = ON');
+    this.initializeSchema();
+  }
+
+  exportJson(): Record<string, any> {
+    return {
+      schema_version: this.SCHEMA_VERSION,
+      db_path: this.dbPath,
+      exported_at: new Date().toISOString(),
+      attempt_results: this.db.prepare('SELECT * FROM attempt_results ORDER BY timestamp DESC').all(),
+      scored_attempts: this.db.prepare('SELECT * FROM scored_attempts ORDER BY timestamp DESC').all(),
+      task_runs: this.db.prepare('SELECT * FROM task_runs ORDER BY timestamp DESC').all(),
+      migrations: this.db.prepare('SELECT * FROM migrations ORDER BY version ASC').all(),
+      metadata: this.db.prepare('SELECT * FROM persistence_metadata ORDER BY key ASC').all(),
+    };
   }
 
   close(): void {
@@ -240,5 +253,119 @@ export class OrchestratorPersistenceManager {
 
   getDbPath(): string {
     return this.dbPath;
+  }
+
+  private runMigrations(fromVersion: number): void {
+    const migrations = this.loadMigrations();
+    for (const migration of migrations) {
+      if (migration.version <= fromVersion || migration.version > this.SCHEMA_VERSION) {
+        continue;
+      }
+      this.db.transaction(() => {
+        this.executeStatements(migration.sql);
+        this.db.prepare('INSERT OR REPLACE INTO migrations (version, name, applied_at) VALUES (?, ?, ?)').run(
+          migration.version,
+          migration.name,
+          new Date().toISOString()
+        );
+      })();
+    }
+  }
+
+  private loadMigrations(): Array<{ version: number; name: string; sql: string }> {
+    const migrationDirCandidates = [
+      path.join(__dirname, 'migrations'),
+      path.join(process.cwd(), 'src', 'core', 'migrations'),
+    ];
+    const migrationDir = migrationDirCandidates.find(candidate => fs.existsSync(candidate));
+    if (!migrationDir) {
+      return this.embeddedMigrations();
+    }
+
+    return fs.readdirSync(migrationDir)
+      .filter(file => /^\d+_.+\.sql$/.test(file))
+      .sort()
+      .map(file => ({
+        version: Number(file.split('_')[0]),
+        name: file.replace(/^\d+_/, '').replace(/\.sql$/, ''),
+        sql: fs.readFileSync(path.join(migrationDir, file), 'utf8'),
+      }));
+  }
+
+  private executeStatements(sql: string): void {
+    for (const statement of sql.split(/;\s*(?:\r?\n|$)/)) {
+      const trimmed = statement.trim();
+      if (trimmed) {
+        this.db.exec(trimmed);
+      }
+    }
+  }
+
+  private rotateBackups(): void {
+    const backups = fs.readdirSync(this.backupDir)
+      .filter(name => /^gorchestrator-.+\.db$/.test(name))
+      .map(name => path.join(this.backupDir, name))
+      .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+    for (const stale of backups.slice(this.backupRetentionCount)) {
+      fs.rmSync(stale, { force: true });
+    }
+  }
+
+  private embeddedMigrations(): Array<{ version: number; name: string; sql: string }> {
+    return [
+      {
+        version: 1,
+        name: 'orchestrator_persistence',
+        sql: `
+          CREATE TABLE IF NOT EXISTS attempt_results (
+            attempt_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            agent_config_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            output TEXT,
+            error TEXT,
+            duration_ms INTEGER NOT NULL,
+            cost_usd REAL NOT NULL,
+            timestamp TEXT NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS scored_attempts (
+            attempt_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            overall_score REAL NOT NULL,
+            correctness_score REAL,
+            efficiency_score REAL,
+            completeness_score REAL,
+            hard_gates_passed INTEGER NOT NULL,
+            timestamp TEXT NOT NULL,
+            FOREIGN KEY (attempt_id) REFERENCES attempt_results(attempt_id)
+          );
+          CREATE TABLE IF NOT EXISTS task_runs (
+            task_id TEXT PRIMARY KEY,
+            description TEXT NOT NULL,
+            total_attempts INTEGER NOT NULL,
+            successful_attempts INTEGER NOT NULL,
+            total_cost_usd REAL NOT NULL,
+            total_duration_ms REAL NOT NULL,
+            winner_attempt_id TEXT,
+            timestamp TEXT NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_attempt_results_task ON attempt_results(task_id, timestamp);
+          CREATE INDEX IF NOT EXISTS idx_attempt_results_timestamp ON attempt_results(timestamp);
+          CREATE INDEX IF NOT EXISTS idx_scored_attempts_task ON scored_attempts(task_id, timestamp);
+          CREATE INDEX IF NOT EXISTS idx_task_runs_timestamp ON task_runs(timestamp);
+        `,
+      },
+      {
+        version: 2,
+        name: 'persistence_operations',
+        sql: `
+          CREATE TABLE IF NOT EXISTS persistence_metadata (
+            key TEXT PRIMARY KEY,
+            value_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          );
+        `,
+      },
+    ];
   }
 }

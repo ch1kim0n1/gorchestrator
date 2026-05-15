@@ -329,32 +329,6 @@ export class GOrchestrator {
       }));
     }
 
-    // Store attempt results and scored attempts in database
-    for (const attempt of attemptResults) {
-      this.persistence.addAttemptResult({
-        attempt_id: attempt.attempt_id,
-        task_id: taskBundle.task_id,
-        config_id: attempt.config_id,
-        status: attempt.status,
-        deliverable: attempt.deliverable?.content,
-        error_message: attempt.error_message,
-        wall_time_ms: attempt.wall_time_ms,
-        cost_usd: attempt.cost.total_cost_usd,
-      });
-    }
-
-    for (const scored of scoredAttempts) {
-      this.persistence.addScoredAttempt({
-        attempt_id: scored.attempt_id,
-        task_id: taskBundle.task_id,
-        overall_score: scored.scores.overall_score,
-        correctness_score: scored.scores.correctness?.score,
-        efficiency_score: scored.scores.robustness?.score,
-        completeness_score: scored.scores.user_outcome?.score,
-        hard_gates_passed: scored.scores.hard_gates_passed,
-      });
-    }
-
     // Phase 5: Selection
     this.logger.info('Phase 5: Selection');
     const selectionResult = await this.selectorEngine.selectWinner(scoredAttempts);
@@ -388,6 +362,37 @@ export class GOrchestrator {
       created_at: new Date(startTime).toISOString(),
       completed_at: new Date().toISOString(),
     };
+
+    this.persistence.addRunArtifacts({
+      attempts: attemptResults.map(attempt => ({
+        attempt_id: attempt.attempt_id,
+        task_id: taskBundle.task_id,
+        config_id: attempt.config_id,
+        status: attempt.status,
+        deliverable: attempt.deliverable?.content,
+        error_message: attempt.error_message,
+        wall_time_ms: attempt.wall_time_ms,
+        cost_usd: attempt.cost.total_cost_usd,
+      })),
+      scoredAttempts: scoredAttempts.map(scored => ({
+        attempt_id: scored.attempt_id,
+        task_id: taskBundle.task_id,
+        overall_score: scored.scores.overall_score,
+        correctness_score: scored.scores.correctness?.score,
+        efficiency_score: scored.scores.robustness?.score,
+        completeness_score: scored.scores.user_outcome?.score,
+        hard_gates_passed: scored.scores.hard_gates_passed,
+      })),
+      taskRun: {
+        task_id: taskBundle.task_id,
+        description: taskBundle.raw_description,
+        total_attempts: scoredAttempts.length,
+        successful_attempts: scoredAttempts.filter(attempt => attempt.status === 'completed').length,
+        total_cost_usd: runRecord.total_cost.total_cost_usd,
+        total_duration_ms: runRecord.total_wall_time_ms,
+        winner_attempt_id: selectionResult.winner_attempt_id,
+      },
+    });
 
     await this.persistRunRecord(runRecord);
 

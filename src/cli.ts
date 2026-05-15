@@ -3,6 +3,7 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
 import { GOrchestrator } from './core/orchestrator.js';
+import { OrchestratorPersistenceManager } from './core/orchestrator-persistence.js';
 
 const program = new Command();
 
@@ -10,6 +11,64 @@ program
   .name('gorchestrator')
   .description('Parallel agent execution manager for the G-Stack')
   .version('0.1.0');
+
+program
+  .command('backup [destination]')
+  .description('Backup GOrchestrator SQLite state')
+  .option('--json', 'Output as JSON')
+  .option('--quiet', 'Suppress output for CI use')
+  .action(async (destination, options) => {
+    const persistence = new OrchestratorPersistenceManager();
+    try {
+      const backupPath = persistence.backup(destination);
+      if (options.json) {
+        console.log(JSON.stringify({ backup_path: backupPath }, null, 2));
+      } else if (!options.quiet) {
+        console.log(chalk.green(`Backup written: ${backupPath}`));
+      }
+    } finally {
+      persistence.close();
+    }
+  });
+
+program
+  .command('restore <backup>')
+  .description('Restore GOrchestrator SQLite state from backup')
+  .option('--json', 'Output as JSON')
+  .option('--quiet', 'Suppress output for CI use')
+  .action(async (backup, options) => {
+    const persistence = new OrchestratorPersistenceManager();
+    try {
+      persistence.restore(backup);
+      if (options.json) {
+        console.log(JSON.stringify({ restored_from: backup }, null, 2));
+      } else if (!options.quiet) {
+        console.log(chalk.green(`Restored from: ${backup}`));
+      }
+    } finally {
+      persistence.close();
+    }
+  });
+
+program
+  .command('export')
+  .description('Export persisted GOrchestrator state')
+  .option('--format <format>', 'Export format: json', 'json')
+  .option('--json', 'Alias for --format json')
+  .action(async (options) => {
+    const format = options.json ? 'json' : String(options.format || 'json').toLowerCase();
+    if (format !== 'json') {
+      console.error(chalk.red(`Unsupported export format: ${format}`));
+      process.exit(1);
+    }
+
+    const persistence = new OrchestratorPersistenceManager();
+    try {
+      console.log(JSON.stringify(persistence.exportJson(), null, 2));
+    } finally {
+      persistence.close();
+    }
+  });
 
 // Run a task through orchestration
 program
@@ -880,6 +939,9 @@ async function runReceiptRegression(against: string | undefined, options: any): 
 
 function buildCompletionScript(shell: string): string | null {
   const commands = [
+    'backup',
+    'restore',
+    'export',
     'run',
     'health',
     'replay',
@@ -899,6 +961,7 @@ function buildCompletionScript(shell: string): string | null {
     '--help',
     '--version',
     '--json',
+    '--format',
     '--quiet',
     '--cycles',
     '--budget-usd',
