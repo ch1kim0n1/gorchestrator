@@ -190,7 +190,10 @@ export class GOrchestrator {
       backend: config.sandboxBackend || 'docker',
     });
 
-    this.selectorEngine = new SelectorEngine({ llmClient: this.llmClient });
+    this.selectorEngine = new SelectorEngine({
+      llmClient: this.llmClient,
+      multiModelConfig: this.multiModelConfig,
+    });
     this.driftDetector = new DriftDetector({
       window_size: 100,
       drift_threshold: 0.2,
@@ -1158,6 +1161,12 @@ export class GOrchestrator {
     const winnerAttempt = runRecord.attempts.find(a => a.attempt_id === runRecord.winner);
     const overallScore = winnerAttempt?.scores.overall_score || 0;
     const hardGatesPassed = winnerAttempt?.scores.hard_gates_passed || false;
+    const consensus = this.selectorEngine.getLastConsensusSummary();
+    const consensusModels = consensus?.votes.map(vote => vote.model_id) || [];
+    const modelList = consensusModels.length > 0 ? Array.from(new Set(consensusModels)) : ['claude-sonnet-4-6'];
+    const validVotes = consensus?.valid_votes || 0;
+    const agreeingVotes = Math.round((consensus?.agreement_ratio || 0) * validVotes);
+    const verdictInterval = this.wilson95(agreeingVotes, validVotes);
 
     return {
       receipt_id: uuidv4(),
@@ -1167,7 +1176,7 @@ export class GOrchestrator {
       rubric_name: GORCHESTRATOR_RUBRIC_V1.name,
       rubric_sha8: rubricHash,
       input_hash: inputHash,
-      models_used: ['claude-sonnet-4-6'],
+      models_used: modelList,
       config_hash: configHash,
       verdict: hardGatesPassed ? 'pass' : 'fail',
       scores: {
@@ -1182,7 +1191,27 @@ export class GOrchestrator {
         winner_attempt_id: runRecord.winner,
         total_attempts: runRecord.attempts.length,
         total_wall_time_ms: runRecord.total_wall_time_ms,
+        consensus,
+        verdict_wilson_95_ci: verdictInterval,
+        small_sample_note: runRecord.attempts.length < 30,
       },
+    };
+  }
+
+  private wilson95(successes: number, total: number): { lower: number; upper: number } {
+    if (total <= 0) {
+      return { lower: 0, upper: 0 };
+    }
+
+    const z = 1.96;
+    const phat = successes / total;
+    const denominator = 1 + (z * z) / total;
+    const center = phat + (z * z) / (2 * total);
+    const margin = z * Math.sqrt((phat * (1 - phat) + (z * z) / (4 * total)) / total);
+
+    return {
+      lower: Math.min(1, Math.max(0, (center - margin) / denominator)),
+      upper: Math.min(1, Math.max(0, (center + margin) / denominator)),
     };
   }
 

@@ -42,6 +42,46 @@ function makeScoredAttempt(id: string, overallScore: number, hardGatesPassed = t
   };
 }
 
+function selectionVote(winnerAttemptId: string, dimensions?: Record<string, number>) {
+  return JSON.stringify({
+    winner_attempt_id: winnerAttemptId,
+    rationale: 'Consensus vote rationale',
+    confidence: 0.8,
+    dimensions: dimensions || {
+      correctness: 0.8,
+      robustness: 0.8,
+      risk: 0.2,
+      cost_efficiency: 0.7,
+    },
+  });
+}
+
+function makeConsensusEngine(responses: string[]) {
+  const modelsByTier = {
+    tier1: 'claude-haiku-4-5-20251001',
+    tier2: 'claude-sonnet-4-6',
+    tier3: 'claude-opus-4-7',
+  };
+  const calls: string[] = [];
+  const fakeClient = {
+    call: jest.fn(async (_prompt: string, options: { model?: string }) => {
+      const content = responses[calls.length];
+      calls.push(options.model || '');
+      return {
+        content,
+        input_tokens: 80,
+        output_tokens: 20,
+        cost_usd: 0.001,
+        model_id: options.model,
+        latency_ms: 1,
+      };
+    }),
+    getModelByTier: jest.fn((tier: keyof typeof modelsByTier) => modelsByTier[tier]),
+  } as unknown as LLMClient;
+
+  return { engine: new SelectorEngine({ llmClient: fakeClient }), calls };
+}
+
 describe('SelectorEngine', () => {
   let engine: SelectorEngine;
 
@@ -86,6 +126,12 @@ describe('SelectorEngine', () => {
         winner_attempt_id: low.attempt_id,
         rationale: 'Lower score has a more complete deliverable for the requested task.',
         confidence: 0.74,
+        dimensions: {
+          correctness: 0.8,
+          robustness: 0.8,
+          risk: 0.2,
+          cost_efficiency: 0.7,
+        },
       }),
       input_tokens: 80,
       output_tokens: 20,
@@ -101,10 +147,48 @@ describe('SelectorEngine', () => {
 
     const result = await llmEngine.selectWinner([low, high]);
 
-    expect(call).toHaveBeenCalledTimes(1);
+    expect(call).toHaveBeenCalledTimes(2);
     expect(result.winner_attempt_id).toBe(low.attempt_id);
     expect(result.rationale).toContain('more complete deliverable');
-    expect(result.confidence).toBe(0.74);
+    expect(result.confidence).toBe(1);
+  });
+
+  it('invokes tier3 when tier1 and tier2 disagree', async () => {
+    const low = makeScoredAttempt('low', 0.4);
+    const high = makeScoredAttempt('high', 0.9);
+    const { engine: consensusEngine, calls } = makeConsensusEngine([
+      selectionVote(low.attempt_id),
+      selectionVote(high.attempt_id),
+      selectionVote(low.attempt_id),
+    ]);
+
+    const result = await consensusEngine.selectWinner([low, high]);
+    const consensus = consensusEngine.getLastConsensusSummary();
+
+    expect(result.winner_attempt_id).toBe(low.attempt_id);
+    expect(calls).toEqual(['claude-haiku-4-5-20251001', 'claude-sonnet-4-6', 'claude-opus-4-7']);
+    expect(consensus?.tier3_invoked).toBe(true);
+    expect(consensus?.agreement_ratio).toBeCloseTo(2 / 3);
+    expect(consensus?.per_dimension_agreement.correctness.wilson_95_ci.lower).toBeGreaterThanOrEqual(0);
+    expect(consensus?.small_sample_note).toBe(true);
+  });
+
+  it('disqualifies model votes with missing dimensions', async () => {
+    const low = makeScoredAttempt('low', 0.4);
+    const high = makeScoredAttempt('high', 0.9);
+    const { engine: consensusEngine } = makeConsensusEngine([
+      selectionVote(low.attempt_id, { correctness: 0.8, robustness: 0.8, risk: 0.2 }),
+      selectionVote(high.attempt_id),
+      selectionVote(high.attempt_id),
+    ]);
+
+    const result = await consensusEngine.selectWinner([low, high]);
+    const consensus = consensusEngine.getLastConsensusSummary();
+
+    expect(result.winner_attempt_id).toBe(high.attempt_id);
+    expect(consensus?.votes[0].disqualified).toBe(true);
+    expect(consensus?.votes[0].disqualification_reason).toContain('missing dimensions: cost_efficiency');
+    expect(consensus?.valid_votes).toBe(2);
   });
 
   it('getSelectionStats calculates average score correctly', () => {
