@@ -1,5 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import * as crypto from 'crypto';
+import * as os from 'os';
+import * as path from 'path';
 import {
   TaskBundle,
   AgentConfig,
@@ -25,8 +27,9 @@ import { checkCostHardGate, GORCHESTRATOR_RUBRIC_V1, getRubricHash } from './gor
 import { ReceiptRegistry } from './receipt-registry.js';
 import { ExecutionReceipt } from '../types/quality-rubric.js';
 import { OrchestratorPersistenceManager } from './orchestrator-persistence.js';
+import { LLMClient } from './llm-client.js';
+import { BudgetLedger } from './budget-ledger.js';
 import { DriftDetector } from '../../../shared/src/core/drift-detector.js';
-import { CostLedger } from '../../../shared/src/core/cost-ledger.js';
 import { LatencyTracker } from '../../../shared/src/core/latency-tracker.js';
 import { AuditLogger } from '../../../shared/src/core/audit-logger.js';
 import { HealthCheckResult } from '../../../shared/src/health/health-checker.js';
@@ -74,7 +77,9 @@ export class GOrchestrator {
   private gbrainCircuitOpenUntil: number = 0;
   private readonly CIRCUIT_BREAKER_TIMEOUT_MS = 60000;
   private driftDetector: DriftDetector;
-  private costLedger: CostLedger;
+  private costLedger: BudgetLedger;
+  private costLedgerReady: Promise<void>;
+  private llmClient: LLMClient;
   private latencyTracker: LatencyTracker;
   private auditLogger: AuditLogger;
   private logger: StructuredLogger;
@@ -96,6 +101,7 @@ export class GOrchestrator {
     this.receiptRegistry = new ReceiptRegistry('gorchestrator');
     this.successRateHistory = [];
     this.persistence = new OrchestratorPersistenceManager(config.dbPath);
+    this.logger = new StructuredLogger('gorchestrator');
     
     const gbrainEndpoint = process.env.GBRAIN_ENDPOINT || this.gbrainEndpoint;
     this.gbrainClient = new GBrainClient({
@@ -145,12 +151,38 @@ export class GOrchestrator {
       budget_remaining_usd: this.multiModelConfig.cost_budget_usd_per_hour,
     };
 
+    this.costLedger = new BudgetLedger({
+      max_budget_usd: this.multiModelConfig.cost_budget_usd_per_hour,
+      alert_threshold_usd: this.multiModelConfig.cost_budget_usd_per_hour * 0.8,
+      default_ttl_ms: 5 * 60 * 1000,
+      scope_caps_usd: {
+        intake: 5.0,
+        sampling: 5.0,
+        execution: 20.0,
+        selection: 5.0,
+        scoring: 10.0,
+      },
+    }, 'gorchestrator');
+    this.costLedgerReady = this.costLedger.init().catch((error) => {
+      this.logger.warn('Failed to initialize budget ledger', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+    this.llmClient = new LLMClient({
+      metricsPersistencePath: path.join(os.homedir(), '.gorchestrator', 'audit', 'llm-metrics.json'),
+      onSpend: async (modelId, inputTokens, outputTokens, costUsd) => {
+        await this.recordLLMSpend(modelId, inputTokens, outputTokens, costUsd);
+      },
+    });
+
     this.intakePrimer = new IntakePrimer({
       gbrainEndpoint: this.gbrainEndpoint,
+      llmClient: this.llmClient,
     });
 
     this.configSampler = new ConfigurationSampler({
       gstackEndpoint: config.gstackEndpoint,
+      llmClient: this.llmClient,
     });
 
     this.sandboxManager = new SandboxPoolManager({
@@ -158,21 +190,14 @@ export class GOrchestrator {
       backend: config.sandboxBackend || 'docker',
     });
 
-    this.selectorEngine = new SelectorEngine();
+    this.selectorEngine = new SelectorEngine({ llmClient: this.llmClient });
     this.driftDetector = new DriftDetector({
       window_size: 100,
       drift_threshold: 0.2,
       alert_threshold: 0.3,
     });
-    this.costLedger = new CostLedger({
-      budget_usd_per_hour: 20.0,
-      max_reserve_usd: 5.0,
-      auto_commit: false,
-      persistence_enabled: true,
-    });
     this.latencyTracker = new LatencyTracker(1000);
     this.auditLogger = new AuditLogger('gorchestrator');
-    this.logger = new StructuredLogger('gorchestrator');
   }
 
   /**
@@ -180,6 +205,30 @@ export class GOrchestrator {
    */
   getLatencyMetrics() {
     return this.latencyTracker.getMetrics();
+  }
+
+  private async recordLLMSpend(
+    modelId: string,
+    inputTokens: number,
+    outputTokens: number,
+    costUsd: number,
+  ): Promise<void> {
+    await this.costLedgerReady;
+    const reserveUsd = Math.max(costUsd, Number(process.env.GORCH_LLM_CALL_RESERVE_USD ?? 0.01));
+    const reservation = this.costLedger.reserve('gorchestrator_llm_call', reserveUsd, Number(process.env.GORCH_LLM_RESERVATION_TTL_MS ?? 5 * 60 * 1000), {
+      scope: 'execution',
+      resolver: 'llm',
+    });
+    await this.costLedger.commit(reservation.id, costUsd, {
+      model_id: modelId,
+      input_tokens: inputTokens,
+      output_tokens: outputTokens,
+      operation: 'gorchestrator_llm_call',
+      metadata: {
+        scope: 'execution',
+        resolver: 'llm',
+      },
+    });
   }
 
   /**
@@ -388,6 +437,7 @@ export class GOrchestrator {
       sandboxManager: this.sandboxManager,
       gstackEndpoint: this.gstackEndpoint,
       maxWallTimeMs: taskBundle.budget.max_wall_time_ms,
+      llmClient: this.llmClient,
     });
 
     // Run all attempts in parallel up to concurrency limit
@@ -965,7 +1015,7 @@ export class GOrchestrator {
    * Get cost statistics
    */
   getCostStats() {
-    return this.costLedger.getStatistics();
+    return this.costLedger.getStats();
   }
 
   /**

@@ -29,10 +29,11 @@ export class IntakePrimer {
   constructor(config: {
     gbrainEndpoint?: string;
     primingTimeoutMs?: number;
+    llmClient?: LLMClient;
   } = {}) {
     this.gbrainEndpoint = config.gbrainEndpoint || 'http://localhost:3000';
     this.primingTimeoutMs = config.primingTimeoutMs || 500;
-    this.llmClient = new LLMClient();
+    this.llmClient = config.llmClient ?? new LLMClient();
   }
 
   /**

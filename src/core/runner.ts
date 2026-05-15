@@ -52,6 +52,9 @@ export class AttemptRunner {
   ): Promise<AttemptResult> {
     const attemptId = uuidv4();
     const startTime = Date.now();
+    const startCostUsd = this.llmClient.getTotalCostUsd();
+    const startTokens = this.llmClient.getTotalTokens();
+    const startCallCount = this.llmClient.getCallCount();
 
     // Provision sandbox
     const sandbox = await this.sandboxManager.provisionSandbox(attemptId);
@@ -63,6 +66,7 @@ export class AttemptRunner {
     const traceEvents: TraceEvent[] = [];
     let totalCost = 0;
     let totalTokens = 0;
+    let modelCallCount = 0;
 
     try {
       // Initialize working directory
@@ -76,6 +80,9 @@ export class AttemptRunner {
         (event) => {
           traceEvents.push(event);
           totalCost += event.cost_usd || 0;
+          if (event.event_type === 'model_call') {
+            modelCallCount++;
+          }
           if (event.data?.input_tokens) {
             totalTokens += event.data.input_tokens + (event.data.output_tokens || 0);
           }
@@ -85,10 +92,12 @@ export class AttemptRunner {
       const endTime = Date.now();
       const wallTimeMs = endTime - startTime;
 
-      // Get actual LLM costs from client
-      const llmCost = this.llmClient.getTotalCostUsd();
-      const llmTokens = this.llmClient.getTotalTokens();
-      const llmCalls = this.llmClient.getCallCount();
+      const llmCost = Math.max(totalCost, this.llmClient.getTotalCostUsd() - startCostUsd);
+      const llmTokens = Math.max(totalTokens, this.llmClient.getTotalTokens() - startTokens);
+      const llmCalls = Math.max(modelCallCount, this.llmClient.getCallCount() - startCallCount);
+      const toolCostUsd = this.estimateToolCost(traceEvents);
+      const sandboxCostUsd = this.estimateSandboxCost(wallTimeMs);
+      const totalCostUsd = llmCost + toolCostUsd + sandboxCostUsd;
 
       return {
         attempt_id: attemptId,
@@ -99,15 +108,15 @@ export class AttemptRunner {
         deliverable,
         trace: {
           events: traceEvents,
-          total_cost_usd: totalCost,
+          total_cost_usd: totalCostUsd,
           total_tokens: llmTokens,
           total_wall_time_ms: wallTimeMs,
         },
         cost: {
-          model_cost_usd: llmCost * 0.8,
-          tool_cost_usd: totalCost * 0.1,
-          sandbox_cost_usd: totalCost * 0.1,
-          total_cost_usd: totalCost,
+          model_cost_usd: llmCost,
+          tool_cost_usd: toolCostUsd,
+          sandbox_cost_usd: sandboxCostUsd,
+          total_cost_usd: totalCostUsd,
           tokens_used: llmTokens,
           llm_calls: llmCalls,
         },
@@ -125,6 +134,15 @@ export class AttemptRunner {
       // Cleanup sandbox (in production, might keep for debugging)
       await this.sandboxManager.destroySandbox(sandbox.sandbox_id).catch(console.error);
     }
+  }
+
+  private estimateToolCost(traceEvents: TraceEvent[]): number {
+    const nonModelEvents = traceEvents.filter(event => event.event_type !== 'model_call').length;
+    return nonModelEvents * Number(process.env.GORCH_TOOL_EVENT_COST_USD ?? 0.00001);
+  }
+
+  private estimateSandboxCost(wallTimeMs: number): number {
+    return (wallTimeMs / 1000) * Number(process.env.GORCH_SANDBOX_SECOND_COST_USD ?? 0.000002);
   }
 
   /**
@@ -800,6 +818,9 @@ Return strict JSON:
   ): AttemptResult {
     const endTime = Date.now();
     const actualWallTimeMs = wallTimeMs || (endTime - startTime);
+    const sandboxCostUsd = this.estimateSandboxCost(actualWallTimeMs);
+    const toolCostUsd = this.estimateToolCost(traceEvents);
+    const totalCostUsd = totalCost + toolCostUsd + sandboxCostUsd;
 
     return {
       attempt_id: attemptId,
@@ -809,15 +830,15 @@ Return strict JSON:
       status: 'errored',
       trace: {
         events: traceEvents,
-        total_cost_usd: totalCost,
+        total_cost_usd: totalCostUsd,
         total_tokens: 0,
         total_wall_time_ms: actualWallTimeMs,
       },
       cost: {
-        model_cost_usd: 0,
-        tool_cost_usd: 0,
-        sandbox_cost_usd: 0,
-        total_cost_usd: totalCost,
+        model_cost_usd: totalCost,
+        tool_cost_usd: toolCostUsd,
+        sandbox_cost_usd: sandboxCostUsd,
+        total_cost_usd: totalCostUsd,
       },
       wall_time_ms: actualWallTimeMs,
       started_at: new Date(startTime).toISOString(),
