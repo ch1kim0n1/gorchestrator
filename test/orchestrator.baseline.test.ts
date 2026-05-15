@@ -3,6 +3,7 @@ process.env.MOCK_SANDBOX = '1';
 import { GOrchestrator } from '../src/core/orchestrator.js';
 import { ReceiptRegistry } from '../src/core/receipt-registry.js';
 import { GORCHESTRATOR_RUBRIC_V1 } from '../src/core/gorchestrator-rubric.js';
+import { evaluateRegressionGates, loadRegressionBaselines } from '../src/core/regression-gates.js';
 
 describe('GOrchestrator Baseline Regression Tests', () => {
   let orchestrator: GOrchestrator;
@@ -51,12 +52,16 @@ describe('GOrchestrator Baseline Regression Tests', () => {
       verify: false,
     });
 
-    // Baseline locked from initial calibration run. Future drift > TOLERANCE fails the gate.
-    const baselineOverallScore = 0.5; // Default score when verification is disabled
+    const receipt = currentRun.execution_receipt;
+    expect(receipt).toBeDefined();
 
-    const currentScore = currentRun.execution_receipt?.overall_score ?? 0;
-    const diff = Math.abs(currentScore - baselineOverallScore);
-    expect(diff).toBeLessThanOrEqual(TOLERANCE);
+    const baselines = await loadRegressionBaselines('test/baselines/regression-baselines.jsonl');
+    const gate = evaluateRegressionGates(receipt!, baselines);
+    const scoreGate = gate.results.find(result => result.dimension === 'overall_score');
+    expect(scoreGate).toBeDefined();
+    expect(scoreGate?.tolerance).toBe(TOLERANCE);
+    expect(scoreGate?.wilson_95_ci).toBeDefined();
+    expect(gate.passed).toBe(true);
   });
 
   it('receipt is persisted to registry', async () => {
