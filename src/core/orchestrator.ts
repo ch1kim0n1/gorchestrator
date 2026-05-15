@@ -37,6 +37,12 @@ import {
   GBrainClientError,
 } from '../../../shared/src/core/gbrain-client.js';
 
+export interface OrchestratorHealthStatus {
+  status: 'healthy' | 'unhealthy';
+  components: Record<string, 'ok' | 'error'>;
+  checks: HealthCheckResult[];
+}
+
 /**
  * Main GOrchestrator
  * 
@@ -166,6 +172,7 @@ export class GOrchestrator {
     });
     this.latencyTracker = new LatencyTracker(1000);
     this.auditLogger = new AuditLogger('gorchestrator');
+    this.logger = new StructuredLogger('gorchestrator');
   }
 
   /**
@@ -708,7 +715,7 @@ export class GOrchestrator {
   /**
    * Health check for all dependencies
    */
-  async healthCheck(): Promise<HealthCheckResult[]> {
+  async healthCheck(): Promise<OrchestratorHealthStatus> {
     const start = performance.now();
     const results: HealthCheckResult[] = [];
     
@@ -806,7 +813,11 @@ export class GOrchestrator {
     }
 
     this.latencyTracker.record(performance.now() - start);
-    return results;
+    const components = Object.fromEntries(
+      results.map((check) => [check.service, check.healthy ? 'ok' : 'error'])
+    ) as Record<string, 'ok' | 'error'>;
+    const status = results.every((check) => check.healthy) ? 'healthy' : 'unhealthy';
+    return { status, components, checks: results };
   }
 
   /**

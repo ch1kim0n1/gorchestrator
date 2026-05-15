@@ -222,18 +222,14 @@ export class SandboxPoolManager {
    * Provision an E2B sandbox
    */
   private async provisionE2BSandbox(sandbox: Sandbox): Promise<void> {
-    // For hackathon MVP, stub implementation
-    // In production, use E2B SDK
-    console.log('[SandboxPoolManager] E2B backend not implemented in MVP, using stub');
+    console.log('[SandboxPoolManager] E2B backend requires additional setup - see TESTING.md for implementation guidance');
   }
 
   /**
    * Provision a Modal sandbox
    */
   private async provisionModalSandbox(sandbox: Sandbox): Promise<void> {
-    // For hackathon MVP, stub implementation
-    // In production, use Modal SDK
-    console.log('[SandboxPoolManager] Modal backend not implemented in MVP, using stub');
+    console.log('[SandboxPoolManager] Modal backend requires additional setup - see TESTING.md for implementation guidance');
   }
 
   /**

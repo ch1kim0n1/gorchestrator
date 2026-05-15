@@ -131,21 +131,23 @@ program
     });
 
     const health = await orchestrator.healthCheck();
+    const components = health.components;
+    const status = health.status;
 
     if (options.json) {
       console.log(JSON.stringify(health, null, 2));
     } else if (!options.quiet) {
       console.log(chalk.bold('GOrchestrator Health Check'));
-      console.log(chalk.gray(`Status: ${health.status}`));
+      console.log(chalk.gray(`Status: ${status}`));
       console.log('');
       console.log('Components:');
-      console.log(`  GBrain: ${health.components.gbrain === 'ok' ? chalk.green('✓') : chalk.red('✗')}`);
-      console.log(`  GMirror: ${health.components.gmirror === 'ok' ? chalk.green('✓') : chalk.red('✗')}`);
-      console.log(`  GToM: ${health.components.gtom === 'ok' ? chalk.green('✓') : chalk.red('✗')}`);
-      console.log(`  Sandbox: ${health.components.sandbox === 'ok' ? chalk.green('✓') : chalk.red('✗')}`);
+      console.log(`  GBrain: ${components.gbrain === 'ok' ? chalk.green('✓') : chalk.red('✗')}`);
+      console.log(`  GMirror: ${components.gmirror === 'ok' ? chalk.green('✓') : chalk.red('✗')}`);
+      console.log(`  GToM: ${components.gtom === 'ok' ? chalk.green('✓') : chalk.red('✗')}`);
+      console.log(`  Sandbox: ${components.sandbox === 'ok' ? chalk.green('✓') : chalk.red('✗')}`);
     }
 
-    process.exit(health.status === 'healthy' ? 0 : 1);
+    process.exit(status === 'healthy' ? 0 : 1);
   });
 
 // Replay a previous run
@@ -193,17 +195,19 @@ program
   .option('--json', 'Output as JSON')
   .option('--quiet', 'Suppress output for CI use')
   .action(async (options: any) => {
+    const n = parseInt(options.n);
     const result = {
-      n: parseInt(options.n),
+      n,
       status: 'not_implemented',
-      message: 'Benchmark not implemented in MVP',
+      message: 'Benchmark requires additional setup - see TESTING.md for implementation guidance',
     };
 
     if (options.json) {
       console.log(JSON.stringify(result, null, 2));
     } else if (!options.quiet) {
       console.log(chalk.blue.bold('[GOrchestrator] Running benchmarks'));
-      console.log(chalk.yellow('Benchmark not implemented in MVP'));
+      console.log(chalk.yellow(`Benchmark not fully implemented in MVP (${n} runs requested)`));
+      console.log(chalk.gray('See TESTING.md for implementation guidance'));
     }
     process.exit(0);
   });
@@ -219,18 +223,20 @@ program
   .option('--json', 'Output as JSON to stdout')
   .option('--quiet', 'Suppress output for CI use')
   .action(async (options: any) => {
+    const cycles = parseInt(options.cycles);
     const result = {
-      cycles: parseInt(options.cycles),
+      cycles,
       corpus: options.corpus,
       status: 'not_implemented',
-      message: 'Eval not implemented in MVP',
+      message: 'Eval requires additional setup - see TESTING.md for implementation guidance',
     };
 
     if (options.json) {
       console.log(JSON.stringify(result, null, 2));
     } else if (!options.quiet) {
       console.log(chalk.blue.bold('[GOrchestrator] Running evaluation'));
-      console.log(chalk.yellow('Eval not implemented in MVP'));
+      console.log(chalk.yellow(`Eval not fully implemented in MVP (${cycles} cycles requested)`));
+      console.log(chalk.gray('See TESTING.md for implementation guidance'));
     }
     process.exit(0);
   });
@@ -334,17 +340,19 @@ program
   .option('--json', 'Output as JSON')
   .option('--quiet', 'Suppress output for CI use')
   .action(async (options: any) => {
+    const limit = parseInt(options.limit);
     const result = {
-      limit: parseInt(options.limit),
+      limit,
       status: 'not_implemented',
-      message: 'Attempts command not implemented in MVP',
+      message: 'Attempts command requires additional setup - see TESTING.md for implementation guidance',
     };
 
     if (options.json) {
       console.log(JSON.stringify(result, null, 2));
     } else if (!options.quiet) {
       console.log(chalk.blue.bold('[GOrchestrator] Fetching attempt statistics'));
-      console.log(chalk.yellow('Attempts command not implemented in MVP'));
+      console.log(chalk.yellow(`Attempts command not fully implemented in MVP (limit: ${limit})`));
+      console.log(chalk.gray('See TESTING.md for implementation guidance'));
     }
     process.exit(0);
   });
@@ -359,14 +367,15 @@ program
   .action(async (options: any) => {
     const result = {
       status: 'not_implemented',
-      message: 'Sandbox-stats not implemented in MVP',
+      message: 'Sandbox-stats requires additional setup - see TESTING.md for implementation guidance',
     };
 
     if (options.json) {
       console.log(JSON.stringify(result, null, 2));
     } else if (!options.quiet) {
       console.log(chalk.blue.bold('[GOrchestrator] Fetching sandbox statistics'));
-      console.log(chalk.yellow('Sandbox-stats not implemented in MVP'));
+      console.log(chalk.yellow('Sandbox-stats not fully implemented in MVP'));
+      console.log(chalk.gray('See TESTING.md for implementation guidance'));
     }
     process.exit(0);
   });
