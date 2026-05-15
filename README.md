@@ -189,7 +189,15 @@ npm run test:coverage       # With coverage report
 
 ## Environment Variables
 
-- `GBRAIN_ENDPOINT` — Override GBrain endpoint
+- `GBRAIN_ENDPOINT` — Override GBrain HTTP endpoint
+- `GBRAIN_INTEGRATION_MODE` — `http` or `mcp` transport for priors and persistence
+- `GBRAIN_MCP_ENDPOINT` — Override GBrain MCP endpoint when MCP mode is enabled
+- `GBRAIN_AUTH_TOKEN` — Bearer token for GBrain HTTP/MCP calls
+- `GBRAIN_TIMEOUT_MS` — Per-call GBrain timeout
+- `GBRAIN_MAX_RETRIES` — Retry count for transient GBrain failures
+- `GBRAIN_BACKOFF_MS` — Initial retry backoff for GBrain calls
+- `GBRAIN_CIRCUIT_FAILURES` — Consecutive transient failures before opening the GBrain circuit
+- `GBRAIN_CIRCUIT_COOLDOWN_MS` — GBrain circuit breaker cooldown
 - `GSTACK_ENDPOINT` — Override GStack endpoint
 - `GMIRROR_ENDPOINT` — Override GMirror endpoint
 - `GTOM_ENDPOINT` — Override GToM endpoint

@@ -12,6 +12,11 @@ import {
 } from '../types/index.js';
 import { LLMClient } from './llm-client.js';
 import { coreLogger } from './observability.js';
+import {
+  GBrainIntegrationClient,
+  GBrainIntegrationConfig,
+  GBrainIntegrationMode,
+} from './gbrain-integration.js';
 
 /**
  * Intake & Priming Module
@@ -23,18 +28,34 @@ import { coreLogger } from './observability.js';
  * - Enrich task with priors and recommended budget
  */
 export class IntakePrimer {
-  private gbrainEndpoint: string;
-  private primingTimeoutMs: number;
   private llmClient: LLMClient;
+  private gbrainClient: GBrainIntegrationClient;
 
   constructor(config: {
     gbrainEndpoint?: string;
+    gbrainMcpEndpoint?: string;
+    gbrainMode?: GBrainIntegrationMode;
+    gbrainAuthToken?: string;
+    gbrainMaxRetries?: number;
+    gbrainInitialBackoffMs?: number;
+    gbrainCircuitBreakerFailureThreshold?: number;
+    gbrainCircuitBreakerCooldownMs?: number;
     primingTimeoutMs?: number;
     llmClient?: LLMClient;
+    gbrainClient?: GBrainIntegrationClient;
   } = {}) {
-    this.gbrainEndpoint = config.gbrainEndpoint || 'http://localhost:3000';
-    this.primingTimeoutMs = config.primingTimeoutMs || 500;
     this.llmClient = config.llmClient ?? new LLMClient();
+    this.gbrainClient = config.gbrainClient ?? new GBrainIntegrationClient({
+      endpoint: config.gbrainEndpoint,
+      mcpEndpoint: config.gbrainMcpEndpoint,
+      mode: config.gbrainMode,
+      authToken: config.gbrainAuthToken,
+      timeoutMs: config.primingTimeoutMs ?? 500,
+      maxRetries: config.gbrainMaxRetries,
+      initialBackoffMs: config.gbrainInitialBackoffMs,
+      circuitBreakerFailureThreshold: config.gbrainCircuitBreakerFailureThreshold,
+      circuitBreakerCooldownMs: config.gbrainCircuitBreakerCooldownMs,
+    } satisfies GBrainIntegrationConfig);
   }
 
   /**
@@ -277,45 +298,7 @@ Return a JSON array of surface names (e.g., ["api", "database"]).`;
       similarity_threshold: 0.7,
     };
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), this.primingTimeoutMs);
-
-    try {
-      const response = await fetch(`${this.gbrainEndpoint}/gbrain/priors`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(request),
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        throw new Error(`GBrain returned ${response.status}`);
-      }
-
-      const data = await response.json();
-      return this.validatePriors(data);
-    } catch (error) {
-      clearTimeout(timeoutId);
-      throw error;
-    }
-  }
-
-  /**
-   * Validate and normalize priors from GBrain
-   */
-  private validatePriors(data: any): GBrainPriorBundle {
-    // In production, use Zod schema validation
-    // For now, return structured default if validation fails
-    return {
-      similar_tasks: data.similar_tasks || [],
-      winning_configs: data.winning_configs || [],
-      known_failure_modes: data.known_failure_modes || [],
-      recommended_n: data.recommended_n || 5,
-      user_preferences: data.user_preferences || {},
-      domain_constraints: data.domain_constraints || {},
-    };
+    return this.gbrainClient.getPriors(request);
   }
 
   /**
