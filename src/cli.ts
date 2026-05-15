@@ -18,6 +18,8 @@ program
   .argument('<task>', 'Task description')
   .option('-f, --task-file <path>', 'Read task from file')
   .option('-n, --attempts <number>', 'Number of parallel attempts', '5')
+  .option('--cycles <number>', 'Number of orchestration cycles to run', '1')
+  .option('--budget-usd <number>', 'Maximum task budget in USD', '100')
   .option('--type <type>', 'Task type (code_generation, refactor, deployment, etc.)')
   .option('--no-verify', 'Skip GMirror verification')
   .option('--cognitive-check', 'Enable GToM cognitive check')
@@ -27,6 +29,7 @@ program
   .option('--gstack <url>', 'GStack endpoint', 'http://localhost:3001')
   .option('-o, --output <path>', 'Write output to file (JSON format)')
   .option('--json', 'Output as JSON to stdout')
+  .option('--quiet', 'Suppress output for CI use')
   .action(async (task, options) => {
     // Basic input validation
     if (!task || typeof task !== 'string' || task.trim().length === 0) {
@@ -49,12 +52,26 @@ program
       console.error(chalk.red('Error: Attempts must be between 1 and 100'));
       process.exit(1);
     }
+    const cycles = parseInt(options.cycles);
+    if (isNaN(cycles) || cycles < 1 || cycles > 100) {
+      console.error(chalk.red('Error: Cycles must be between 1 and 100'));
+      process.exit(1);
+    }
+    const budgetUsd = parseFloat(options.budgetUsd);
+    if (isNaN(budgetUsd) || budgetUsd <= 0) {
+      console.error(chalk.red('Error: Budget must be a positive number'));
+      process.exit(1);
+    }
 
-    console.log(chalk.blue.bold('[GOrchestrator] Starting orchestration run'));
-    console.log(chalk.gray(`Task: ${task}`));
-    console.log(chalk.gray(`Attempts: ${attempts}`));
-    console.log(chalk.gray(`Verify: ${options.verify}`));
-    console.log(chalk.gray(`Cognitive Check: ${options.cognitiveCheck}`));
+    if (!options.quiet) {
+      console.log(chalk.blue.bold('[GOrchestrator] Starting orchestration run'));
+      console.log(chalk.gray(`Task: ${task}`));
+      console.log(chalk.gray(`Attempts: ${attempts}`));
+      console.log(chalk.gray(`Cycles: ${cycles}`));
+      console.log(chalk.gray(`Budget: $${budgetUsd.toFixed(2)}`));
+      console.log(chalk.gray(`Verify: ${options.verify}`));
+      console.log(chalk.gray(`Cognitive Check: ${options.cognitiveCheck}`));
+    }
 
     const orchestrator = new GOrchestrator({
       gbrainEndpoint: options.gbrain,
@@ -71,40 +88,65 @@ program
         taskDescription = fileContent.trim();
       }
 
-      const startTime = Date.now();
-      const result = await orchestrator.runTask({
-        description: taskDescription,
-        taskType: options.type,
-        n: attempts,
-        verify: options.verify,
-        cognitiveCheck: options.cognitiveCheck,
-      });
+      const cycleOutputs = [];
+      for (let cycle = 0; cycle < cycles; cycle++) {
+        if (cycles > 1 && !options.quiet) {
+          console.log(chalk.gray(`Cycle ${cycle + 1}/${cycles}`));
+        }
+        const startTime = Date.now();
+        const result = await orchestrator.runTask({
+          description: taskDescription,
+          taskType: options.type,
+          n: attempts,
+          verify: options.verify,
+          cognitiveCheck: options.cognitiveCheck,
+          budget: {
+            max_attempts: attempts,
+            max_cost_usd: budgetUsd,
+            max_wall_time_ms: 300000,
+            max_parallelism: attempts,
+          },
+        });
 
-      const duration = Date.now() - startTime;
-      const output = {
-        task_id: result.task_id,
-        winner: result.winner,
-        attempts: result.attempts,
-        total_cost_usd: result.total_cost?.total_cost_usd || 0,
-        wall_time_ms: duration,
-        gbrain_write_status: result.gbrain_write_status,
-        timestamp: new Date().toISOString(),
+        const duration = Date.now() - startTime;
+        cycleOutputs.push({
+          cycle: cycle + 1,
+          task_id: result.task_id,
+          winner: result.winner,
+          attempts: result.attempts,
+          total_cost_usd: result.total_cost?.total_cost_usd || 0,
+          wall_time_ms: duration,
+          gbrain_write_status: result.gbrain_write_status,
+          timestamp: new Date().toISOString(),
+        });
+      }
+
+      const output = cycles === 1 ? cycleOutputs[0] : {
+        cycles,
+        budget_usd: budgetUsd,
+        total_runs: cycleOutputs.length,
+        avg_cost_usd: cycleOutputs.reduce((sum, result) => sum + result.total_cost_usd, 0) / cycleOutputs.length,
+        avg_wall_time_ms: cycleOutputs.reduce((sum, result) => sum + result.wall_time_ms, 0) / cycleOutputs.length,
+        results: cycleOutputs,
       };
+      const latest = cycleOutputs[cycleOutputs.length - 1];
 
       if (options.json) {
         console.log(JSON.stringify(output, null, 2));
       } else if (options.output) {
         const fs = await import('fs/promises');
         await fs.writeFile(options.output, JSON.stringify(output, null, 2));
-        console.log(chalk.green(`[GOrchestrator] Results written to ${options.output}`));
-      } else {
+        if (!options.quiet) {
+          console.log(chalk.green(`[GOrchestrator] Results written to ${options.output}`));
+        }
+      } else if (!options.quiet) {
         console.log(chalk.green.bold('\n[GOrchestrator] Orchestration completed'));
-        console.log(chalk.gray(`Task ID: ${result.task_id}`));
-        console.log(chalk.gray(`Winner: ${result.winner}`));
-        console.log(chalk.gray(`Attempts: ${result.attempts.length}`));
-        console.log(chalk.gray(`Total Cost: $${(result.total_cost?.total_cost_usd || 0).toFixed(4)}`));
-        console.log(chalk.gray(`Wall Time: ${duration}ms`));
-        console.log(chalk.gray(`GBrain Status: ${result.gbrain_write_status}`));
+        console.log(chalk.gray(`Task ID: ${latest.task_id}`));
+        console.log(chalk.gray(`Winner: ${latest.winner}`));
+        console.log(chalk.gray(`Attempts: ${latest.attempts.length}`));
+        console.log(chalk.gray(`Total Cost: $${latest.total_cost_usd.toFixed(4)}`));
+        console.log(chalk.gray(`Wall Time: ${latest.wall_time_ms}ms`));
+        console.log(chalk.gray(`GBrain Status: ${latest.gbrain_write_status}`));
       }
 
       process.exit(0);
@@ -249,6 +291,7 @@ program
   .option('-c, --corpus <path>', 'Path to test corpus JSON')
   .option('--against <receipt>', 'Receipt path or ID to compare against in regress mode')
   .option('--cycles <number>', 'Number of cycles to run', '1')
+  .option('--budget-usd <number>', 'Maximum task budget in USD per eval case', '100')
   .option('--gbrain <url>', 'GBrain endpoint', 'http://localhost:3000')
   .option('-o, --output <path>', 'Write output to file (JSON format)')
   .option('--json', 'Output as JSON to stdout')
@@ -260,8 +303,14 @@ program
     }
 
     const cycles = parseInt(options.cycles);
+    const budgetUsd = parseFloat(options.budgetUsd);
+    if (isNaN(budgetUsd) || budgetUsd <= 0) {
+      console.error(chalk.red('[GOrchestrator] --budget-usd must be a positive number'));
+      process.exit(1);
+    }
     const result = {
       cycles,
+      budget_usd: budgetUsd,
       corpus: options.corpus,
       status: 'not_implemented',
       message: 'Eval requires additional setup - see TESTING.md for implementation guidance',
@@ -284,6 +333,7 @@ program
   .option('--until <date>', 'Only include receipts up to YYYY-MM-DD')
   .option('--limit <n>', 'Maximum number of receipts to print', '50')
   .option('--json', 'Output as JSON')
+  .option('--quiet', 'Suppress output for CI use')
   .action(async (options: any) => {
     try {
       const { ReceiptRegistry } = await import('./core/receipt-registry.js');
@@ -304,7 +354,7 @@ program
       const receipts = (await receiptRegistry.getAllBetween(start, end)).slice(-limit);
       if (options.json) {
         console.log(JSON.stringify(receipts, null, 2));
-      } else {
+      } else if (!options.quiet) {
         for (const receipt of receipts) {
           console.log(`${receipt.timestamp} ${receipt.receipt_id} ${receipt.verdict} score=${receipt.overall_score.toFixed(3)} corpus=${receipt.metadata?.corpus_sha8 || receipt.input_hash.substring(0, 8)}`);
         }
@@ -320,6 +370,7 @@ program
   .command('diff <receiptA> <receiptB>')
   .description('Diff two execution receipts')
   .option('--json', 'Output as JSON')
+  .option('--quiet', 'Suppress output for CI use')
   .action(async (receiptA: string, receiptB: string, options: any) => {
     try {
       const { ReceiptRegistry } = await import('./core/receipt-registry.js');
@@ -334,7 +385,7 @@ program
       const diff = receiptRegistry.diff(a, b);
       if (options.json) {
         console.log(JSON.stringify(diff, null, 2));
-      } else {
+      } else if (!options.quiet) {
         console.log(chalk.blue.bold('[GOrchestrator] Receipt Diff'));
         console.log(`  Verdict: ${diff.verdict.from} -> ${diff.verdict.to}`);
         console.log(`  Overall score: ${diff.overall_score.from} -> ${diff.overall_score.to} (${diff.overall_score.delta >= 0 ? '+' : ''}${diff.overall_score.delta.toFixed(3)})`);
@@ -597,6 +648,7 @@ program
   .option('--by-model', 'Break down by model')
   .option('--by-operation', 'Break down by operation')
   .option('--json', 'Output as JSON')
+  .option('--quiet', 'Suppress output for CI use')
   .action(async (options: any) => {
     try {
       const { BudgetLedger } = await import('./core/budget-ledger.js');
@@ -621,7 +673,7 @@ program
           breakdown['by_operation'] = ledger.getSpendByOperation();
         }
         console.log(JSON.stringify({ spend, ...breakdown }, null, 2));
-      } else {
+      } else if (!options.quiet) {
         const period = options.week ? 'this week' : options.month ? 'this month' : 'today';
         console.log(chalk.blue(`LLM Spend ${period}: $${spend.toFixed(4)}`));
         
@@ -760,6 +812,27 @@ program
     }
   });
 
+program
+  .command('completion')
+  .description('Print shell completion script')
+  .argument('[shell]', 'Shell type: bash, zsh, or fish', 'bash')
+  .option('--json', 'Output as JSON')
+  .option('--quiet', 'Suppress output for CI use')
+  .action((shell: string, options: any) => {
+    const normalized = String(shell).toLowerCase();
+    const script = buildCompletionScript(normalized);
+    if (!script) {
+      console.error(chalk.red('[GOrchestrator] Shell must be one of: bash, zsh, fish'));
+      process.exit(1);
+    }
+    if (options.json) {
+      console.log(JSON.stringify({ shell: normalized, script }, null, 2));
+    } else if (!options.quiet) {
+      console.log(script);
+    }
+    process.exit(0);
+  });
+
 async function runReceiptRegression(against: string | undefined, options: any): Promise<void> {
   if (!against) {
     console.error(chalk.red('[GOrchestrator] --against is required for receipt regression'));
@@ -803,6 +876,67 @@ async function runReceiptRegression(against: string | undefined, options: any): 
   }
 
   process.exit(regressionPassed ? 0 : 1);
+}
+
+function buildCompletionScript(shell: string): string | null {
+  const commands = [
+    'run',
+    'health',
+    'replay',
+    'benchmark',
+    'eval',
+    'receipts',
+    'diff',
+    'regress',
+    'attempts',
+    'sandbox-stats',
+    'drift',
+    'cost',
+    'trend',
+    'completion',
+  ];
+  const options = [
+    '--help',
+    '--version',
+    '--json',
+    '--quiet',
+    '--cycles',
+    '--budget-usd',
+    '--attempts',
+    '--gbrain',
+    '--gmirror',
+    '--gtom',
+    '--gstack',
+    '--output',
+    '--corpus',
+    '--against',
+  ];
+  const words = [...commands, ...options].join(' ');
+
+  if (shell === 'bash') {
+    return `_gorchestrator_completions()
+{
+  local cur
+  COMPREPLY=()
+  cur="\${COMP_WORDS[COMP_CWORD]}"
+  COMPREPLY=( $(compgen -W "${words}" -- "$cur") )
+}
+complete -F _gorchestrator_completions gorchestrator`;
+  }
+
+  if (shell === 'zsh') {
+    return `#compdef gorchestrator
+_arguments '1:command:(${commands.join(' ')})' '*::option:(${options.join(' ')})'`;
+  }
+
+  if (shell === 'fish') {
+    return [
+      ...commands.map(command => `complete -c gorchestrator -f -a ${command}`),
+      ...options.map(option => `complete -c gorchestrator -f -l ${option.slice(2)}`),
+    ].join('\n');
+  }
+
+  return null;
 }
 
 program.parse();
