@@ -774,100 +774,28 @@ export class GOrchestrator {
    */
   async healthCheck(): Promise<OrchestratorHealthStatus> {
     const start = performance.now();
-    const results: HealthCheckResult[] = [];
-    
-    // Check gbrain
-    const gbrainStart = performance.now();
-    try {
-      const response = await fetch(`${this.gbrainEndpoint}/health`, {
-        method: 'GET',
-        signal: AbortSignal.timeout(5000),
-      });
-      results.push({
-        service: 'gbrain',
-        healthy: response.ok,
-        latency_ms: performance.now() - gbrainStart,
-        error: response.ok ? undefined : `HTTP ${response.status}`,
-        timestamp: new Date().toISOString(),
-      });
-    } catch (error) {
-      results.push({
-        service: 'gbrain',
-        healthy: false,
-        latency_ms: performance.now() - gbrainStart,
-        error: error instanceof Error ? error.message : 'Unknown error',
-        timestamp: new Date().toISOString(),
-      });
-    }
+    const results = await Promise.all([
+      this.checkHttpEndpoint('gbrain', this.gbrainEndpoint),
+      this.checkHttpEndpoint('gmirror', this.gmirrorEndpoint),
+      this.checkHttpEndpoint('gtom', this.gtomEndpoint),
+      this.checkHttpEndpoint('gstack', this.gstackEndpoint),
+      this.checkLLMApiHealth(),
+      this.checkSandboxHealth(),
+      this.checkSyncFreshness(),
+      this.checkSchemaVersion(),
+      this.checkQueueHealth(),
+      this.checkHealthTrend(),
+      this.checkEvalCaptureFailures(),
+    ]);
 
-    // Check gmirror
-    const gmirrorStart = performance.now();
-    try {
-      const response = await fetch(`${this.gmirrorEndpoint}/health`, {
-        method: 'GET',
-        signal: AbortSignal.timeout(5000),
-      });
-      results.push({
-        service: 'gmirror',
-        healthy: response.ok,
-        latency_ms: performance.now() - gmirrorStart,
-        error: response.ok ? undefined : `HTTP ${response.status}`,
-        timestamp: new Date().toISOString(),
-      });
-    } catch (error) {
-      results.push({
-        service: 'gmirror',
-        healthy: false,
-        latency_ms: performance.now() - gmirrorStart,
-        error: error instanceof Error ? error.message : 'Unknown error',
-        timestamp: new Date().toISOString(),
-      });
-    }
-
-    // Check gtom
-    const gtomStart = performance.now();
-    try {
-      const response = await fetch(`${this.gtomEndpoint}/health`, {
-        method: 'GET',
-        signal: AbortSignal.timeout(5000),
-      });
-      results.push({
-        service: 'gtom',
-        healthy: response.ok,
-        latency_ms: performance.now() - gtomStart,
-        error: response.ok ? undefined : `HTTP ${response.status}`,
-        timestamp: new Date().toISOString(),
-      });
-    } catch (error) {
-      results.push({
-        service: 'gtom',
-        healthy: false,
-        latency_ms: performance.now() - gtomStart,
-        error: error instanceof Error ? error.message : 'Unknown error',
-        timestamp: new Date().toISOString(),
-      });
-    }
-
-    // Check sandbox
-    const sandboxStart = performance.now();
-    try {
-      const sandboxStatus = await this.checkSandbox();
-      results.push({
-        service: 'sandbox',
-        healthy: sandboxStatus === 'ok',
-        latency_ms: performance.now() - sandboxStart,
-        error: sandboxStatus === 'ok' ? undefined : 'Sandbox unavailable',
-        timestamp: new Date().toISOString(),
-      });
-    } catch (error) {
-      results.push({
-        service: 'sandbox',
-        healthy: false,
-        latency_ms: performance.now() - sandboxStart,
-        error: error instanceof Error ? error.message : 'Unknown error',
-        timestamp: new Date().toISOString(),
-      });
-    }
+    const healthScore = this.calculateHealthScore(results);
+    results.push({
+      service: 'health_score',
+      healthy: healthScore >= 80,
+      latency_ms: performance.now() - start,
+      error: healthScore >= 80 ? undefined : `score=${healthScore}`,
+      timestamp: new Date().toISOString(),
+    });
 
     this.latencyTracker.record(performance.now() - start);
     const components = Object.fromEntries(
@@ -875,6 +803,165 @@ export class GOrchestrator {
     ) as Record<string, 'ok' | 'error'>;
     const status = results.every((check) => check.healthy) ? 'healthy' : 'unhealthy';
     return { status, components, checks: results };
+  }
+
+  private async checkHttpEndpoint(service: string, endpoint: string): Promise<HealthCheckResult> {
+    const start = performance.now();
+    try {
+      const response = await fetch(`${endpoint}/health`, {
+        method: 'GET',
+        signal: AbortSignal.timeout(5000),
+      });
+      return this.result(service, response.ok, start, response.ok ? undefined : `HTTP ${response.status}`);
+    } catch (error) {
+      return this.result(service, false, start, error instanceof Error ? error.message : 'Unknown error');
+    }
+  }
+
+  private async checkLLMApiHealth(): Promise<HealthCheckResult> {
+    const start = performance.now();
+    try {
+      if (process.env.ANTHROPIC_API_KEY) {
+        const Anthropic = (await import('@anthropic-ai/sdk')).default;
+        const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+        const response = await client.messages.create({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 1,
+          messages: [{ role: 'user', content: 'ping' }],
+        });
+        return this.result('llm_api', Boolean(response.id), start);
+      }
+      if (process.env.OPENAI_API_KEY) {
+        const OpenAI = (await import('openai')).default;
+        const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+        const response = await client.chat.completions.create({
+          model: 'gpt-4o-mini',
+          max_tokens: 1,
+          messages: [{ role: 'user', content: 'ping' }],
+        });
+        return this.result('llm_api', Boolean(response.id), start);
+      }
+      return this.result('llm_api', false, start, 'No LLM API key configured');
+    } catch (error) {
+      return this.result('llm_api', false, start, error instanceof Error ? error.message : 'LLM ping failed');
+    }
+  }
+
+  private async checkSandboxHealth(): Promise<HealthCheckResult> {
+    const start = performance.now();
+    try {
+      const sandboxStatus = await this.checkSandbox();
+      return this.result('sandbox', sandboxStatus === 'ok', start, sandboxStatus === 'ok' ? undefined : 'Sandbox unavailable');
+    } catch (error) {
+      return this.result('sandbox', false, start, error instanceof Error ? error.message : 'Unknown error');
+    }
+  }
+
+  private async checkSyncFreshness(): Promise<HealthCheckResult> {
+    const start = performance.now();
+    const latestReceipt = await this.receiptRegistry.getLatest();
+    const corpusPath = path.join(process.cwd(), '.gbrain-corpus');
+    const timestamps = [
+      latestReceipt ? new Date(latestReceipt.timestamp).getTime() : 0,
+      fs.existsSync(corpusPath) ? fs.statSync(corpusPath).mtimeMs : 0,
+      fs.existsSync(this.successRateHistoryPath) ? fs.statSync(this.successRateHistoryPath).mtimeMs : 0,
+    ].filter(value => value > 0);
+    const newest = Math.max(0, ...timestamps);
+    const ageMs = newest > 0 ? Date.now() - newest : Number.POSITIVE_INFINITY;
+    return this.result(
+      'sync_freshness',
+      Number.isFinite(ageMs) && ageMs <= 24 * 60 * 60 * 1000,
+      start,
+      Number.isFinite(ageMs) ? `age_ms=${Math.round(ageMs)}` : 'No sync artifacts or receipts found',
+    );
+  }
+
+  private async checkSchemaVersion(): Promise<HealthCheckResult> {
+    const start = performance.now();
+    const latestReceipt = await this.receiptRegistry.getLatest();
+    const healthy = !latestReceipt || latestReceipt.schema_version === 1;
+    return this.result('schema_version', healthy, start, healthy ? undefined : `receipt_schema=${latestReceipt?.schema_version}`);
+  }
+
+  private async checkQueueHealth(): Promise<HealthCheckResult> {
+    const start = performance.now();
+    const stats = this.getSandboxStats() as { active?: number; queued?: number; maxConcurrency?: number };
+    const memory = process.memoryUsage();
+    const heapRatio = memory.heapTotal > 0 ? memory.heapUsed / memory.heapTotal : 0;
+    const queued = stats.queued ?? 0;
+    const maxConcurrency = stats.maxConcurrency ?? 1;
+    const healthy = heapRatio < 0.9 && queued <= maxConcurrency * 2;
+    return this.result('queue_health', healthy, start, `active=${stats.active ?? 0} queued=${queued} heap_ratio=${heapRatio.toFixed(3)}`);
+  }
+
+  private async checkHealthTrend(): Promise<HealthCheckResult> {
+    const start = performance.now();
+    const now = new Date();
+    const dayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const [day, week] = await Promise.all([
+      this.receiptRegistry.getAllBetween(dayAgo, now),
+      this.receiptRegistry.getAllBetween(weekAgo, now),
+    ]);
+    const passRate = (receipts: any[]) => receipts.length === 0 ? 1 : receipts.filter(receipt => receipt.hard_gates_passed && receipt.verdict !== 'fail').length / receipts.length;
+    const dayRate = passRate(day);
+    const weekRate = passRate(week);
+    return this.result(
+      'health_trend',
+      dayRate >= Math.max(0.5, weekRate - 0.15),
+      start,
+      `pass_rate_24h=${dayRate.toFixed(3)} pass_rate_7d=${weekRate.toFixed(3)} receipts_24h=${day.length} receipts_7d=${week.length}`,
+    );
+  }
+
+  private async checkEvalCaptureFailures(): Promise<HealthCheckResult> {
+    const start = performance.now();
+    const now = new Date();
+    const dayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    const receipts = await this.receiptRegistry.getAllBetween(dayAgo, now);
+    const failures = receipts.filter((receipt: any) =>
+      receipt.metadata?.eval_capture_failed ||
+      receipt.metadata?.eval_capture?.status === 'failed' ||
+      (receipt.errors ?? []).some((error: string) => /eval[_ -]?capture/i.test(error)),
+    );
+    return this.result('eval_capture', failures.length === 0, start, `failures_24h=${failures.length}`);
+  }
+
+  private calculateHealthScore(results: HealthCheckResult[]): number {
+    const weights: Record<string, number> = {
+      gbrain: 20,
+      gmirror: 15,
+      gtom: 10,
+      gstack: 10,
+      llm_api: 15,
+      sandbox: 10,
+      sync_freshness: 10,
+      schema_version: 10,
+      queue_health: 5,
+      health_trend: 10,
+      eval_capture: 5,
+    };
+    let earned = 0;
+    let total = 0;
+    for (const result of results) {
+      const weight = weights[result.service] ?? 2;
+      total += weight;
+      if (result.healthy) {
+        const latencyPenalty = result.latency_ms > 2000 ? 0.75 : result.latency_ms > 500 ? 0.9 : 1;
+        earned += weight * latencyPenalty;
+      }
+    }
+    return total === 0 ? 0 : Math.round((earned / total) * 100);
+  }
+
+  private result(service: string, healthy: boolean, start: number, error?: string): HealthCheckResult {
+    return {
+      service,
+      healthy,
+      latency_ms: performance.now() - start,
+      error: healthy ? undefined : error,
+      timestamp: new Date().toISOString(),
+    };
   }
 
   /**

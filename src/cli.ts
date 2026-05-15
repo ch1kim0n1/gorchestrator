@@ -121,6 +121,7 @@ program
   .option('--gbrain <url>', 'GBrain endpoint', 'http://localhost:3000')
   .option('--gmirror <url>', 'GMirror endpoint', 'http://localhost:3002')
   .option('--gtom <url>', 'GToM endpoint', 'http://localhost:3003')
+  .option('--gstack <url>', 'GStack endpoint', 'http://localhost:3001')
   .option('--json', 'Output as JSON')
   .option('--quiet', 'Suppress output for CI use')
   .action(async (options: any) => {
@@ -128,6 +129,7 @@ program
       gbrainEndpoint: options.gbrain,
       gmirrorEndpoint: options.gmirror,
       gtomEndpoint: options.gtom,
+      gstackEndpoint: options.gstack,
     });
 
     const health = await orchestrator.healthCheck();
@@ -141,6 +143,7 @@ program
       console.log(chalk.gray(`Status: ${status}`));
       console.log('');
       console.log('Components:');
+      console.log(`  GStack: ${components.gstack === 'ok' ? chalk.green('ok') : chalk.red('error')}`);
       console.log(`  GBrain: ${components.gbrain === 'ok' ? chalk.green('✓') : chalk.red('✗')}`);
       console.log(`  GMirror: ${components.gmirror === 'ok' ? chalk.green('✓') : chalk.red('✗')}`);
       console.log(`  GToM: ${components.gtom === 'ok' ? chalk.green('✓') : chalk.red('✗')}`);
