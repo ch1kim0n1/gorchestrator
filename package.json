@@ -2,16 +2,20 @@
   "name": "gorchestrator",
   "version": "0.1.0",
   "description": "Parallel agent execution manager for the G-Stack",
-  "main": "./dist/core/index.js",
-  "types": "./dist/core/index.d.ts",
+  "main": "./dist/gorchestrator/src/sdk.js",
+  "types": "./dist/gorchestrator/src/sdk.d.ts",
   "bin": {
     "gorchestrator": "./dist/cli.js"
   },
   "exports": {
     ".": {
-      "types": "./dist/core/index.d.ts",
-      "import": "./dist/core/index.js",
-      "require": "./dist/core/index.js"
+      "types": "./dist/gorchestrator/src/sdk.d.ts",
+      "import": "./dist/gorchestrator/src/sdk.js",
+      "require": "./dist/gorchestrator/src/sdk.js"
+    },
+    "./sdk": {
+      "require": "./dist/gorchestrator/src/sdk.js",
+      "types": "./dist/gorchestrator/src/sdk.d.ts"
     },
     "./cli": {
       "types": "./dist/cli.d.ts",

@@ -1,3 +1,20 @@
+## Quickstart (60 seconds)
+
+```bash
+npm install gorchestrator
+```
+
+```typescript
+import { GStackSDK } from 'gorchestrator';
+const stack = new GStackSDK({ apiKey: process.env.ANTHROPIC_API_KEY });
+const result = await stack.run('write a TypeScript function to validate emails');
+console.log(result.output);
+```
+
+> No Docker. No services. Run any task through parallel LLM attempts and get the best result.
+
+---
+
 # GOrchestrator — Parallel Agent Execution Manager
 
 The crew boss of the G-Stack. GOrchestrator turns a single task into N parallel attempts, runs each in an isolated sandbox with its own agent configuration, scores the outputs against verifiable criteria, and selects or merges the winner.

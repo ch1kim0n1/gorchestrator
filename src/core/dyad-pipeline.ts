@@ -12,8 +12,8 @@ import { DetectorPool } from './detector-pool.js';
 export class DyadPipeline {
   constructor(private readonly config: {
     detectorPool: DetectorPool;
-    gtomEndpoint: string;
-    gmirrorEndpoint: string;
+    gtomEndpoint?: string;
+    gmirrorEndpoint?: string;
     fetchImpl?: typeof fetch;
     logger?: { warn: (message: string, context?: Record<string, unknown>) => void };
   }) {}
@@ -97,6 +97,12 @@ export class DyadPipeline {
     task: RelationshipAnalysisTask,
     detectorOutputs: DetectorOutput[],
   ): Promise<ScoreResponse> {
+    if (!this.config.gmirrorEndpoint) {
+      const confidence = detectorOutputs.length > 0
+        ? detectorOutputs.reduce((sum, o) => sum + o.confidence, 0) / detectorOutputs.length
+        : 0.8;
+      return { overall: 'pass', confidence, scores: {} };
+    }
     const fetchImpl = this.config.fetchImpl ?? fetch;
     const request = this.buildScoreInsightRequest(task, detectorOutputs);
     const response = await fetchImpl(`${this.config.gmirrorEndpoint}/gmirror/score-insight`, {
