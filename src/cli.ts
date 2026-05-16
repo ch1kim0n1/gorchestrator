@@ -3,6 +3,7 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
 import { GOrchestrator } from './core/orchestrator.js';
+import { bestOfCommand } from './commands/best-of.js';
 import { OrchestratorPersistenceManager } from './core/orchestrator-persistence.js';
 import { GStackGBrainSync } from './core/gstack-gbrain-sync.js';
 import {
@@ -951,6 +952,24 @@ program
       console.log(script);
     }
     process.exit(0);
+  });
+
+program
+  .command('best-of <task>')
+  .description('Run N parallel LLM attempts and return the best-scored one (no external services required)')
+  .option('-n, --n <count>', 'Number of parallel attempts', (v: string) => parseInt(v, 10), 3)
+  .option('-m, --model <model>', 'Generator model', 'claude-haiku-4-5-20251001')
+  .option('--scorer-model <model>', 'Scorer model', 'claude-haiku-4-5-20251001')
+  .option('-s, --system <prompt>', 'System prompt override')
+  .option('--json', 'Output as JSON')
+  .action(async (task: string, opts: any) => {
+    await bestOfCommand(task, {
+      n: opts.n,
+      model: opts.model,
+      scorerModel: opts.scorerModel,
+      system: opts.system,
+      json: opts.json ?? false,
+    });
   });
 
 async function runReceiptRegression(against: string | undefined, options: any): Promise<void> {
