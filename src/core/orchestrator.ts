@@ -39,6 +39,7 @@ import {
   GBrainIntegrationMode,
 } from './gbrain-integration.js';
 import { getDefaultSecretManager } from './security.js';
+import { ProgressEvent, TaskBackpressureLimiter } from './performance.js';
 
 export interface OrchestratorHealthStatus {
   status: 'healthy' | 'unhealthy';
@@ -82,6 +83,8 @@ export class GOrchestrator {
   private auditLogger: LocalAuditLogger;
   private logger: LocalLogger;
   private observability: GOrchestratorObservability;
+  private taskLimiter: TaskBackpressureLimiter;
+  private maxConcurrency: number;
 
   constructor(config: {
     gbrainEndpoint?: string;
@@ -97,10 +100,13 @@ export class GOrchestrator {
     gbrainCircuitBreakerFailureThreshold?: number;
     gbrainCircuitBreakerCooldownMs?: number;
     maxConcurrency?: number;
+    maxQueueDepth?: number;
     sandboxBackend?: 'docker' | 'e2b' | 'modal' | 'daytona' | 'firecracker';
     dbPath?: string;
     multiModelConfig?: MultiModelConfig;
   } = {}) {
+    this.maxConcurrency = config.maxConcurrency || 5;
+    this.taskLimiter = new TaskBackpressureLimiter(this.maxConcurrency, config.maxQueueDepth ?? this.maxConcurrency * 4);
     this.gbrainEndpoint = config.gbrainEndpoint || 'http://localhost:3000';
     this.gmirrorEndpoint = config.gmirrorEndpoint || 'http://localhost:3002';
     this.gstackEndpoint = config.gstackEndpoint || 'http://localhost:3001';
@@ -202,7 +208,7 @@ export class GOrchestrator {
     });
 
     this.sandboxManager = new SandboxPoolManager({
-      maxConcurrency: config.maxConcurrency || 5,
+      maxConcurrency: this.maxConcurrency,
       backend: config.sandboxBackend || 'docker',
     });
 
@@ -290,6 +296,8 @@ export class GOrchestrator {
     verify?: boolean;
     cognitiveCheck?: boolean;
     priority?: 'normal' | 'high' | 'critical';
+    signal?: AbortSignal;
+    onProgress?: (event: ProgressEvent) => void;
   }): Promise<OrchestratorRunRecord> {
     const start = performance.now();
     const startTime = Date.now();
@@ -300,37 +308,53 @@ export class GOrchestrator {
     }, String((rawTask as any).traceparent || rawTask.userContext || ''));
     let currentTier = this.multiModelConfig.default_tier;
     let escalated = false;
+    const releaseProcessingSlot = await this.taskLimiter.acquire(rawTask.signal);
+    this.emitProgress(rawTask.onProgress, {
+      phase: 'queued',
+      message: 'Task accepted by processing limiter',
+      progress: 0.02,
+      metadata: this.taskLimiter.getStats(),
+    });
 
     try {
+      this.throwIfCancelled(rawTask.signal);
       // Update metrics
       this.escalationMetrics.total_tasks++;
       this.escalationMetrics.tier1_count++;
 
       // Phase 1: Intake & Priming
       this.logger.info('Phase 1: Intake & Priming (Tier 1)');
+      this.emitProgress(rawTask.onProgress, { phase: 'intake', message: 'Normalizing task and loading priors', progress: 0.1 });
       const taskBundle = await this.intakePrimer.intakeTask(rawTask);
+      this.throwIfCancelled(rawTask.signal);
 
       // Phase 2: Configuration Sampling
       this.logger.info('Phase 2: Configuration Sampling (Tier 1)');
+      this.emitProgress(rawTask.onProgress, { task_id: taskBundle.task_id, phase: 'sampling', message: 'Sampling agent configurations', progress: 0.22 });
       const samplingStartTime = Date.now();
       const samplingPlan = await this.configSampler.sampleConfigurations(
         taskBundle,
         rawTask.n
       );
+      this.throwIfCancelled(rawTask.signal);
       const samplingDuration = Date.now() - samplingStartTime;
       this.escalationMetrics.tier1_avg_latency_ms = samplingDuration;
 
       // Phase 3: Parallel Execution
       this.logger.info('Phase 3: Parallel Execution');
+      this.emitProgress(rawTask.onProgress, { task_id: taskBundle.task_id, phase: 'execution', message: 'Running attempts with bounded concurrency', progress: 0.4, metadata: { maxConcurrency: this.maxConcurrency } });
       const attemptResults = await this.runParallelAttempts(
         taskBundle,
-        samplingPlan.configs
+        samplingPlan.configs,
+        rawTask.signal,
       );
+      this.throwIfCancelled(rawTask.signal);
 
       // Phase 4: Scoring (if verification enabled)
       let scoredAttempts: ScoredAttempt[] = [];
       if (rawTask.verify !== false) {
         this.logger.info('Phase 4: Scoring via GMirror (with escalation check)');
+        this.emitProgress(rawTask.onProgress, { task_id: taskBundle.task_id, phase: 'scoring', message: 'Scoring attempts and checking hard gates', progress: 0.62 });
         scoredAttempts = await this.scoreAttemptsWithEscalation(
           taskBundle,
           attemptResults,
@@ -374,6 +398,7 @@ export class GOrchestrator {
 
       // Phase 5: Selection
       this.logger.info('Phase 5: Selection');
+      this.emitProgress(rawTask.onProgress, { task_id: taskBundle.task_id, phase: 'selection', message: 'Selecting winning attempt', progress: 0.78 });
       const selectionResult = await this.selectorEngine.selectWinner(scoredAttempts);
 
       // Mark winner in attempts
@@ -388,11 +413,13 @@ export class GOrchestrator {
       // Phase 6: Cognitive Check (if enabled)
       if (rawTask.cognitiveCheck) {
         this.logger.info('Phase 6: Cognitive Check via GToM');
+        this.emitProgress(rawTask.onProgress, { task_id: taskBundle.task_id, phase: 'cognitive_check', message: 'Running cognitive conflict check', progress: 0.86 });
         await this.performCognitiveCheck(taskBundle, scoredAttempts);
       }
 
       // Phase 7: Persistence
       this.logger.info('Phase 7: Persistence to GBrain');
+      this.emitProgress(rawTask.onProgress, { task_id: taskBundle.task_id, phase: 'persistence', message: 'Persisting run record and receipt', progress: 0.92 });
       const runRecord: OrchestratorRunRecord = {
         task_id: taskBundle.task_id,
         task_bundle: taskBundle,
@@ -469,6 +496,7 @@ export class GOrchestrator {
         cost_usd: runRecord.total_cost.total_cost_usd,
         metadata: { attempts: scoredAttempts.length, gbrain_write_status: runRecord.gbrain_write_status },
       });
+      this.emitProgress(rawTask.onProgress, { task_id: runRecord.task_id, phase: 'complete', message: 'Task orchestration complete', progress: 1 });
       this.observability.tracer.endSpan(span);
       return runRecord;
     } catch (error) {
@@ -483,8 +511,61 @@ export class GOrchestrator {
         error: error instanceof Error ? error.message : String(error),
       });
       this.observability.tracer.endSpan(span, error instanceof Error ? error : new Error(String(error)));
+      if (rawTask.signal?.aborted) {
+        this.emitProgress(rawTask.onProgress, { phase: 'cancelled', message: 'Task orchestration cancelled', progress: 1 });
+      }
       throw error;
+    } finally {
+      releaseProcessingSlot();
     }
+  }
+
+  async *runTaskStream(rawTask: Parameters<GOrchestrator['runTask']>[0]): AsyncGenerator<ProgressEvent | { phase: 'result'; result: OrchestratorRunRecord }, void, unknown> {
+    const events: ProgressEvent[] = [];
+    let notify: (() => void) | undefined;
+    let done = false;
+    const taskPromise = this.runTask({
+      ...rawTask,
+      onProgress: (event) => {
+        rawTask.onProgress?.(event);
+        events.push(event);
+        notify?.();
+      },
+    }).then((result) => {
+      done = true;
+      events.push({ phase: 'complete', message: 'Result ready', progress: 1, timestamp: new Date().toISOString() });
+      notify?.();
+      return result;
+    }).catch((error) => {
+      done = true;
+      notify?.();
+      throw error;
+    });
+
+    while (!done || events.length > 0) {
+      if (events.length === 0) {
+        await new Promise<void>(resolve => { notify = resolve; });
+        notify = undefined;
+        continue;
+      }
+      yield events.shift()!;
+    }
+    yield { phase: 'result', result: await taskPromise };
+  }
+
+  getTaskProcessingStats(): { active: number; queued: number; maxConcurrency: number; maxQueueDepth: number } {
+    return this.taskLimiter.getStats();
+  }
+
+  private emitProgress(
+    callback: ((event: ProgressEvent) => void) | undefined,
+    event: Omit<ProgressEvent, 'timestamp'>,
+  ): void {
+    callback?.({ ...event, timestamp: new Date().toISOString() });
+  }
+
+  private throwIfCancelled(signal?: AbortSignal): void {
+    if (signal?.aborted) throw new Error('Task orchestration cancelled');
   }
 
   /**
@@ -513,7 +594,8 @@ export class GOrchestrator {
    */
   private async runParallelAttempts(
     taskBundle: TaskBundle,
-    configs: AgentConfig[]
+    configs: AgentConfig[],
+    signal?: AbortSignal,
   ): Promise<AttemptResult[]> {
     const runner = new AttemptRunner({
       sandboxManager: this.sandboxManager,
@@ -524,9 +606,10 @@ export class GOrchestrator {
 
     // Run all attempts in parallel up to concurrency limit
     const results: AttemptResult[] = [];
-    const batchSize = taskBundle.budget.max_parallelism;
+    const batchSize = Math.max(1, Math.min(taskBundle.budget.max_parallelism, this.maxConcurrency));
 
     for (let i = 0; i < configs.length; i += batchSize) {
+      this.throwIfCancelled(signal);
       const batch = configs.slice(i, i + batchSize);
       const batchResults = await Promise.all(
         batch.map(config => runner.runAttempt(taskBundle, config))

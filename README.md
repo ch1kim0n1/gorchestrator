@@ -49,6 +49,7 @@ gorchestrator history
 | `sync` | Register stack tool sources with GBrain using incremental, full, and dry-run modes |
 | `attempts` | View recent attempt records |
 | `replay <run-id>` | Replay a previous run with variations |
+| `benchmark` | Run tracked synthetic latency and memory benchmarks |
 | `receipts` | Query execution receipts |
 | `drift` | Check drift detector output |
 | `cost` | Inspect budget ledger spend |
@@ -171,6 +172,7 @@ npm run dev
 | `docs/API.md` | TypeDoc entrypoints and public API summary |
 | `docs/MCP_CONTRACT.md` | MCP tool contract |
 | `docs/EVAL_BASELINE.md` | Evaluation baseline policy |
+| `docs/PERFORMANCE.md` | Benchmarks, load tests, SLO/SLI, backpressure, streaming, cancellation, and caching |
 | `docs/RUNBOOK.md` | Common operator tasks |
 | `docs/TROUBLESHOOTING.md` | Failure diagnosis |
 | `docs/SECURITY_MODEL.md` | Trust boundaries and controls |

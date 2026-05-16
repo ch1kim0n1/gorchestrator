@@ -12,6 +12,7 @@ import {
   sanitizeCliString,
   sanitizeCliUrl,
 } from './core/security.js';
+import { BenchmarkSample, memorySnapshotMb, summarizeBenchmark } from './core/performance.js';
 
 const program = new Command();
 
@@ -419,24 +420,59 @@ program
   .command('benchmark')
   .description('Run benchmark tests')
   .option('--n <number>', 'Number of benchmark runs', '10')
+  .option('--max-concurrency <number>', 'Overall task concurrency limit', '2')
   .option('--json', 'Output as JSON')
   .option('--quiet', 'Suppress output for CI use')
   .action(async (options: any) => {
-    const n = parseInt(options.n);
+    const n = sanitizeCliInteger(options.n, '--n', 1, 100);
+    const maxConcurrency = sanitizeCliInteger(options.maxConcurrency, '--max-concurrency', 1, 64);
+    const previousMock = process.env.MOCK_SANDBOX;
+    process.env.MOCK_SANDBOX = previousMock ?? '1';
+    const orchestrator = new GOrchestrator({ maxConcurrency });
+    const samples: BenchmarkSample[] = [];
+    for (let i = 0; i < n; i++) {
+      const started = performance.now();
+      let success = false;
+      try {
+        await orchestrator.runTask({
+          description: `Benchmark synthetic task ${i + 1}`,
+          taskType: 'code_generation',
+          budget: { max_attempts: 1, max_cost_usd: 1, max_wall_time_ms: 15000, max_parallelism: maxConcurrency },
+          verify: false,
+        });
+        success = true;
+      } catch {
+        success = false;
+      }
+      const memory = memorySnapshotMb();
+      samples.push({
+        name: `synthetic-${i + 1}`,
+        duration_ms: Number((performance.now() - started).toFixed(2)),
+        success,
+        ...memory,
+      });
+    }
+    if (previousMock === undefined) {
+      delete process.env.MOCK_SANDBOX;
+    } else {
+      process.env.MOCK_SANDBOX = previousMock;
+    }
     const result = {
+      status: 'completed',
       n,
-      status: 'not_implemented',
-      message: 'Benchmark requires additional setup - see TESTING.md for implementation guidance',
+      maxConcurrency,
+      summary: summarizeBenchmark(samples),
+      samples,
     };
 
     if (options.json) {
       console.log(JSON.stringify(result, null, 2));
     } else if (!options.quiet) {
       console.log(chalk.blue.bold('[GOrchestrator] Running benchmarks'));
-      console.log(chalk.yellow(`Benchmark not fully implemented in MVP (${n} runs requested)`));
-      console.log(chalk.gray('See TESTING.md for implementation guidance'));
+      console.log(chalk.green(`Completed ${n} runs`));
+      console.log(chalk.gray(`p50=${result.summary.p50_ms}ms p95=${result.summary.p95_ms}ms success=${(result.summary.success_rate * 100).toFixed(1)}% maxRSS=${result.summary.max_rss_mb}MB`));
     }
-    process.exit(0);
+    process.exit(result.summary.success_rate === 1 ? 0 : 1);
   });
 
 // Eval command

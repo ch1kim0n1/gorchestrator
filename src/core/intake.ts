@@ -17,6 +17,7 @@ import {
   GBrainIntegrationConfig,
   GBrainIntegrationMode,
 } from './gbrain-integration.js';
+import { TTLCache } from './performance.js';
 
 /**
  * Intake & Priming Module
@@ -30,6 +31,7 @@ import {
 export class IntakePrimer {
   private llmClient: LLMClient;
   private gbrainClient: GBrainIntegrationClient;
+  private priorsCache: TTLCache<string, GBrainPriorBundle>;
 
   constructor(config: {
     gbrainEndpoint?: string;
@@ -43,6 +45,7 @@ export class IntakePrimer {
     primingTimeoutMs?: number;
     llmClient?: LLMClient;
     gbrainClient?: GBrainIntegrationClient;
+    priorsCache?: TTLCache<string, GBrainPriorBundle>;
   } = {}) {
     this.llmClient = config.llmClient ?? new LLMClient();
     this.gbrainClient = config.gbrainClient ?? new GBrainIntegrationClient({
@@ -56,6 +59,7 @@ export class IntakePrimer {
       circuitBreakerFailureThreshold: config.gbrainCircuitBreakerFailureThreshold,
       circuitBreakerCooldownMs: config.gbrainCircuitBreakerCooldownMs,
     } satisfies GBrainIntegrationConfig);
+    this.priorsCache = config.priorsCache ?? new TTLCache<string, GBrainPriorBundle>(256, Number(process.env.GORCH_PRIORS_CACHE_TTL_MS ?? 5 * 60 * 1000));
   }
 
   /**
@@ -75,11 +79,17 @@ export class IntakePrimer {
     const signature = await this.generateSignature(rawTask);
     
     // Query GBrain for priors (with timeout)
-    const priors = await this.queryPriors(signature).catch((error) => {
+    const cachedPriors = this.priorsCache.get(signature.hash);
+    const priors = cachedPriors ?? await this.queryPriors(signature).then((result) => {
+      this.priorsCache.set(signature.hash, result);
+      return result;
+    }).catch((error) => {
       coreLogger.warn('GBrain priming failed; proceeding with empty priors', {
         error: error instanceof Error ? error.message : String(error),
       });
-      return this.emptyPriors();
+      const empty = this.emptyPriors();
+      this.priorsCache.set(signature.hash, empty);
+      return empty;
     });
 
     // Determine recommended budget from priors or defaults
