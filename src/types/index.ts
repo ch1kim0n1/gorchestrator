@@ -254,13 +254,13 @@ export type OrchestratorRunRecord = z.infer<typeof OrchestratorRunRecordSchema>;
 // ============================================================================
 
 export const SandboxConfigSchema = z.object({
-  backend: z.enum(['docker', 'e2b', 'modal', 'daytona', 'firecracker']),
+  backend: z.enum(['docker', 'e2b', 'modal', 'daytona', 'firecracker', 'inprocess']),
   image: z.string(),
   resource_limits: z.object({
-    cpu_cores: z.number().positive().default(2),
-    memory_mb: z.number().int().positive().default(4096),
-    disk_gb: z.number().positive().default(10),
-    max_wall_time_ms: z.number().int().positive().default(300000),
+    cpu_cores: z.number().int().positive(),
+    memory_mb: z.number().int().positive(),
+    disk_gb: z.number().int().positive(),
+    max_wall_time_ms: z.number().int().positive(),
   }),
   network_isolation: z.boolean().default(true),
   allowlisted_domains: z.array(z.string()).default([]),

@@ -18,6 +18,10 @@
       "import": "./dist/cli.js",
       "require": "./dist/cli.js"
     },
+    "./client": {
+      "types": "./dist/gorchestrator/src/client.d.ts",
+      "require": "./dist/gorchestrator/src/client.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [

@@ -40,6 +40,26 @@ gorchestrator health
 gorchestrator history
 ```
 
+### No Docker? Use in-process mode
+
+If Docker is not available or you prefer not to use containers, GOrchestrator can run tasks directly via LLM calls without sandbox isolation:
+
+```bash
+# Set in-process backend in .env
+SANDBOX_BACKEND=inprocess
+
+# Or use environment variable
+export SANDBOX_BACKEND=inprocess
+gorchestrator run "implement user authentication"
+```
+
+The in-process backend:
+- Executes tasks via direct LLM API calls (no containers)
+- Requires ANTHROPIC_API_KEY or OPENAI_API_KEY
+- Provides cost tracking and execution metrics
+- Has no isolation (use with trusted prompts only)
+- Auto-detects Docker availability and falls back when unavailable
+
 ## CLI Commands
 
 | Command | Description |

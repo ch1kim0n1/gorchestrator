@@ -7,6 +7,7 @@ import {
 } from '../types/index.js';
 import { coreLogger } from './observability.js';
 import { sanitizeCliPath, sanitizeCliString } from './security.js';
+import { InProcessSandboxBackend, isDockerAvailable } from './sandbox-inprocess.js';
 
 /**
  * Sandbox Pool Manager
@@ -24,6 +25,7 @@ export class SandboxPoolManager {
   private maxConcurrency: number;
   private backend: SandboxConfig['backend'];
   private mockMode: boolean;
+  private inProcessBackend: InProcessSandboxBackend;
 
   constructor(config: {
     maxConcurrency?: number;
@@ -32,8 +34,17 @@ export class SandboxPoolManager {
     this.activeSandboxes = new Map();
     this.pendingQueue = [];
     this.maxConcurrency = config.maxConcurrency || 5;
-    this.backend = config.backend || 'docker';
     this.mockMode = process.env.MOCK_SANDBOX === '1';
+    
+    // Auto-detect backend: use config if provided, otherwise check Docker availability
+    const configBackend = config.backend || process.env.SANDBOX_BACKEND as SandboxConfig['backend'];
+    if (configBackend) {
+      this.backend = configBackend;
+    } else {
+      this.backend = 'docker'; // Default to docker, will fall back to inprocess if unavailable
+    }
+    
+    this.inProcessBackend = new InProcessSandboxBackend();
   }
 
   /**
@@ -93,6 +104,9 @@ export class SandboxPoolManager {
         case 'modal':
           await this.provisionModalSandbox(sandbox);
           break;
+        case 'inprocess':
+          await this.provisionInProcessSandbox(sandbox);
+          break;
         default:
           throw new Error(`Unsupported backend: ${config.backend}`);
       }
@@ -112,7 +126,11 @@ export class SandboxPoolManager {
    * Provision a Docker sandbox
    */
   private async provisionDockerSandbox(sandbox: Sandbox): Promise<void> {
-    if (this.mockMode) { return; }
+    if (this.mockMode) {
+      // Mock mode uses in-process backend for real LLM calls
+      await this.inProcessBackend.provision();
+      return;
+    }
     const { config, sandbox_id } = sandbox;
     const containerName = `gorch-${sandbox_id}`;
 
@@ -186,7 +204,10 @@ export class SandboxPoolManager {
    * Apply network restrictions using iptables to allow only allowlisted domains
    */
   private async applyNetworkRestrictions(containerName: string, allowlistedDomains: string[]): Promise<void> {
-    if (this.mockMode) return;
+    if (this.mockMode) {
+      // Mock mode skips network restrictions (in-process has no container)
+      return;
+    }
 
     try {
       // Flush existing iptables rules in OUTPUT chain
@@ -249,6 +270,13 @@ export class SandboxPoolManager {
   }
 
   /**
+   * Provision an in-process sandbox (no-op, just marks as ready)
+   */
+  private async provisionInProcessSandbox(sandbox: Sandbox): Promise<void> {
+    await this.inProcessBackend.provision();
+  }
+
+  /**
    * Execute a command in a sandbox
    */
   async executeCommand(
@@ -275,6 +303,8 @@ export class SandboxPoolManager {
           return await this.executeE2BCommand(sandbox, command, cwd);
         case 'modal':
           return await this.executeModalCommand(sandbox, command, cwd);
+        case 'inprocess':
+          return await this.executeInProcessCommand(sandbox, command, cwd);
         default:
           throw new Error(`Unsupported backend: ${sandbox.config.backend}`);
       }
@@ -294,7 +324,13 @@ export class SandboxPoolManager {
     cwd?: string
   ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
     if (this.mockMode) {
-      return { stdout: `[MOCK] ${command}`, stderr: '', exitCode: 0 };
+      // Mock mode uses in-process backend for real LLM calls
+      const result = await this.inProcessBackend.execute(sandbox, command);
+      return {
+        stdout: result.stdout,
+        stderr: result.stderr,
+        exitCode: result.exitCode,
+      };
     }
     const containerName = `gorch-${sandbox.sandbox_id}`;
     const dockerArgs = this.buildDockerExecArgs(containerName, command, cwd);
@@ -333,6 +369,22 @@ export class SandboxPoolManager {
   ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
     // Stub for MVP
     return { stdout: '', stderr: 'Modal not implemented', exitCode: 1 };
+  }
+
+  /**
+   * Execute command in in-process sandbox (direct LLM call)
+   */
+  private async executeInProcessCommand(
+    sandbox: Sandbox,
+    command: string,
+    cwd?: string
+  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const result = await this.inProcessBackend.execute(sandbox, command);
+    return {
+      stdout: result.stdout,
+      stderr: result.stderr,
+      exitCode: result.exitCode,
+    };
   }
 
   /**
@@ -410,7 +462,10 @@ export class SandboxPoolManager {
    * Snapshot Docker sandbox
    */
   private async snapshotDockerSandbox(sandbox: Sandbox): Promise<string> {
-    if (this.mockMode) { return `mock-snapshot-${sandbox.sandbox_id}`; }
+    if (this.mockMode) {
+      // Mock mode returns a mock snapshot ID (in-process has no container to snapshot)
+      return `mock-snapshot-${sandbox.sandbox_id}`;
+    }
     const containerName = `gorch-${sandbox.sandbox_id}`;
     const snapshotName = `${containerName}-snapshot-${Date.now()}`;
     
@@ -485,6 +540,9 @@ export class SandboxPoolManager {
         case 'modal':
           await this.destroyModalSandbox(sandbox);
           break;
+        case 'inprocess':
+          await this.destroyInProcessSandbox(sandbox);
+          break;
       }
     } catch (error) {
       coreLogger.error('Error destroying sandbox', {
@@ -501,7 +559,11 @@ export class SandboxPoolManager {
    * Destroy Docker sandbox
    */
   private async destroyDockerSandbox(sandbox: Sandbox): Promise<void> {
-    if (this.mockMode) return;
+    if (this.mockMode) {
+      // Mock mode uses in-process backend destroy (no-op)
+      await this.inProcessBackend.destroy();
+      return;
+    }
     const containerName = `gorch-${sandbox.sandbox_id}`;
 
     await this.execSafe('docker', ['stop', containerName]).catch(() => {});
@@ -520,6 +582,13 @@ export class SandboxPoolManager {
    */
   private async destroyModalSandbox(sandbox: Sandbox): Promise<void> {
     // Stub for MVP
+  }
+
+  /**
+   * Destroy in-process sandbox (no-op)
+   */
+  private async destroyInProcessSandbox(sandbox: Sandbox): Promise<void> {
+    await this.inProcessBackend.destroy();
   }
 
   /**

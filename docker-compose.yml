@@ -1,0 +1,91 @@
+version: '3.8'
+
+# GOrchestrator standalone compose.
+# Depends on GBrain, GMirror, and GToM for full functionality.
+# Set SANDBOX_BACKEND=inprocess to skip Docker-in-Docker for sandboxing.
+
+services:
+  gorchestrator:
+    build: .
+    ports:
+      - '3001:8080'
+    environment:
+      - NODE_ENV=production
+      - GORCHESTRATOR_PORT=8080
+      - GBRAIN_ENDPOINT=http://gbrain:3000
+      - GMIRROR_ENDPOINT=http://gmirror:3002
+      - GTOM_ENDPOINT=http://gtom:3003
+      - SANDBOX_BACKEND=inprocess
+    volumes:
+      - gorchestrator-data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock  # only needed for SANDBOX_BACKEND=docker
+    depends_on:
+      gbrain:
+        condition: service_healthy
+      gmirror:
+        condition: service_healthy
+      gtom:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:8080/health/live']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  gbrain:
+    build:
+      context: ../gbrain
+    ports:
+      - '3000:3000'
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - GBRAIN_DB_PATH=/data/gbrain.db
+    volumes:
+      - gbrain-data:/data
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:3000/health']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  gmirror:
+    build:
+      context: ../gmirror
+    ports:
+      - '3002:8080'
+    environment:
+      - NODE_ENV=production
+      - GMIRROR_PORT=8080
+      - GBRAIN_ENDPOINT=http://gbrain:3000
+    depends_on:
+      gbrain:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:8080/health/live']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  gtom:
+    build:
+      context: ../GToM
+    ports:
+      - '3003:8080'
+    environment:
+      - NODE_ENV=production
+      - GTOM_PORT=8080
+      - GBRAIN_ENDPOINT=http://gbrain:3000
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:8080/health/live']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  gorchestrator-data:
+  gbrain-data:
