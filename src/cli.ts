@@ -4,6 +4,7 @@ import { Command } from 'commander';
 import chalk from 'chalk';
 import { GOrchestrator } from './core/orchestrator.js';
 import { OrchestratorPersistenceManager } from './core/orchestrator-persistence.js';
+import { GStackGBrainSync } from './core/gstack-gbrain-sync.js';
 
 const program = new Command();
 
@@ -272,6 +273,39 @@ program
     }
 
     process.exit(status === 'healthy' ? 0 : 1);
+  });
+
+program
+  .command('sync')
+  .description('Sync GOrchestrator and stack tool sources into GBrain')
+  .option('--incremental', 'Run incremental sync (default)')
+  .option('--full', 'Run full sync and clean legacy source registrations')
+  .option('--dry-run', 'Show planned sync without writing files or registering sources')
+  .option('--json', 'Output as JSON')
+  .option('--quiet', 'Suppress output for CI use')
+  .action(async (options: any) => {
+    const mode = options.full ? 'full' : 'incremental';
+    const sync = new GStackGBrainSync();
+
+    if (!options.quiet && !options.json) {
+      console.log(chalk.blue(`[GOrchestrator] Syncing stack sources (${mode}${options.dryRun ? ', dry run' : ''})`));
+    }
+
+    const result = await sync.run({ mode, dryRun: options.dryRun });
+
+    if (options.json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else if (!options.quiet) {
+      for (const stage of result.stages) {
+        const color = stage.status === 'ok' ? 'green' : stage.status === 'skipped' ? 'yellow' : 'red';
+        console.log(`  ${chalk[color](stage.status.padEnd(7))} ${stage.stage}: ${stage.items_changed}/${stage.items_total} changed`);
+        if (stage.error) console.log(`    ${chalk.red(stage.error)}`);
+      }
+      const statusColor = result.status === 'ok' ? 'green' : result.status === 'partial' ? 'yellow' : 'red';
+      console.log(chalk[statusColor](`[GOrchestrator] Sync ${result.status}`));
+    }
+
+    process.exit(result.status === 'ok' ? 0 : 1);
   });
 
 // Replay a previous run
@@ -965,6 +999,7 @@ function buildCompletionScript(shell: string): string | null {
     'metrics',
     'run',
     'health',
+    'sync',
     'replay',
     'benchmark',
     'eval',
@@ -994,6 +1029,9 @@ function buildCompletionScript(shell: string): string | null {
     '--output',
     '--corpus',
     '--against',
+    '--incremental',
+    '--full',
+    '--dry-run',
   ];
   const words = [...commands, ...options].join(' ');
 

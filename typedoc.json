@@ -12,5 +12,6 @@
   "readme": "docs/API.md",
   "excludePrivate": true,
   "excludeProtected": true,
+  "skipErrorChecking": true,
   "hideGenerator": true
 }

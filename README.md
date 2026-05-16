@@ -46,6 +46,7 @@ gorchestrator history
 |---------|-------------|
 | `run <task>` | Execute task with parallel attempts |
 | `health` | Check system status and dependencies |
+| `sync` | Register stack tool sources with GBrain using incremental, full, and dry-run modes |
 | `attempts` | View recent attempt records |
 | `replay <run-id>` | Replay a previous run with variations |
 | `receipts` | Query execution receipts |
@@ -53,6 +54,12 @@ gorchestrator history
 | `cost` | Inspect budget ledger spend |
 | `metrics` | Export Prometheus, OpenTelemetry, or JSON observability data |
 | `backup`, `restore`, `export` | Operate on persisted state |
+
+`gorchestrator sync --incremental` emits gstack-compatible stage results, registers each
+stack tool as a federated GBrain source with a `pathhash8` ID, and writes a
+`.gbrain-source` attachment into each tool path. `gorchestrator sync --full` also removes
+legacy source IDs from the prior sync state. `gorchestrator sync --dry-run --json` shows
+planned commands without acquiring a lock, writing source dotfiles, or updating state.
 
 ## Configuration
 
@@ -201,6 +208,8 @@ npm run test:coverage       # With coverage report
 - `GSTACK_ENDPOINT` — Override GStack endpoint
 - `GMIRROR_ENDPOINT` — Override GMirror endpoint
 - `GTOM_ENDPOINT` — Override GToM endpoint
+- `GORCHESTRATOR_SYNC_ROOT` - Override the `gstack-gbrain-sync` lock and state directory
+- `GORCHESTRATOR_TOOL_<NAME>_PATH` - Override a source path for `gbrain`, `gstack`, `gorchestrator`, `gmirror`, `gtom`, or `glearn`
 - `MOCK_SANDBOX` — Set to `1` to use mock sandbox mode (for testing)
 - `MAX_CONCURRENCY` — Override max concurrent sandboxes
 
