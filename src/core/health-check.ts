@@ -1,5 +1,5 @@
 import { ReceiptRegistry } from './receipt-registry.js';
-import { wilsonCI, formatWilsonCI, WilsonCI } from '../../../shared/src/core/wilson-ci.js';
+import { wilsonCI, formatWilsonCI, WilsonCI } from '@gstack/shared/core';
 
 export interface HealthCheckResult {
   status: 'healthy' | 'degraded' | 'unhealthy';

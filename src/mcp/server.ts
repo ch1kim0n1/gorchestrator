@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { GOrchestrator } from '../core/orchestrator.js';
 import { coreLogger, LocalAuditLogger } from '../core/observability.js';
 import { getDefaultSecretManager, PermissionModel } from '../core/security.js';
-import { createAuthMiddleware, type AuthConfig, type AuthToken } from '../../../shared/src/core/token-auth.js';
+import { createAuthMiddleware, type AuthConfig, type AuthToken } from '@gstack/shared/core';
 
 type McpScope = 'read' | 'write';
 

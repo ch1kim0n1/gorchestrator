@@ -23,7 +23,7 @@ import {
   RelationshipAnalysisTask,
   RelationshipAnalysisTaskSchema,
 } from '../types/index.js';
-import { determineConsensus, ConsensusResult, OutputComparison } from '../../../shared/src/core/consensus.js';
+import { determineConsensus, ConsensusResult, OutputComparison } from '@gstack/shared/core';
 import { IntakePrimer } from './intake.js';
 import { ConfigurationSampler } from './sampler.js';
 import { SandboxPoolManager } from './sandbox.js';
@@ -35,9 +35,9 @@ import { ExecutionReceipt } from '../types/quality-rubric.js';
 import { OrchestratorPersistenceManager } from './orchestrator-persistence.js';
 import { LLMClient } from './llm-client.js';
 import { BudgetLedger } from './budget-ledger.js';
-import { DriftDetector } from '../../../shared/src/core/drift-detector.js';
-import { LatencyTracker } from '../../../shared/src/core/latency-tracker.js';
-import { HealthCheckResult } from '../../../shared/src/health/health-checker.js';
+import { DriftDetector } from '@gstack/shared/core';
+import { LatencyTracker } from '@gstack/shared/core';
+import { HealthCheckResult } from '@gstack/shared/health';
 import { GOrchestratorObservability, LocalAuditLogger, LocalLogger } from './observability.js';
 import {
   GBrainIntegrationClient,
