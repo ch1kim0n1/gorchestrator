@@ -4,6 +4,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
+import { z } from 'zod';
 import { GOrchestrator } from '../core/orchestrator.js';
 import { coreLogger, LocalAuditLogger } from '../core/observability.js';
 import { getDefaultSecretManager, PermissionModel } from '../core/security.js';
@@ -402,6 +403,14 @@ class GOrchestratorMCPServer {
     };
   }
 
+  private static readonly RunArgsSchema = z.object({
+    task: z.string().min(1),
+    n: z.number().int().positive().optional(),
+    taskType: z.string().optional(),
+    verify: z.boolean().optional(),
+    cognitiveCheck: z.boolean().optional(),
+  });
+
   private async handleRun(args: {
     task: string;
     n?: number;
@@ -409,12 +418,16 @@ class GOrchestratorMCPServer {
     verify?: boolean;
     cognitiveCheck?: boolean;
   }) {
+    const parsed = GOrchestratorMCPServer.RunArgsSchema.safeParse(args);
+    if (!parsed.success) {
+      return this.errorResponse(`Invalid request: ${JSON.stringify(parsed.error.flatten())}`);
+    }
     const result = await this.orchestrator.runTask({
-      description: args.task,
-      taskType: args.taskType,
-      n: args.n || 5,
-      verify: args.verify !== false,
-      cognitiveCheck: args.cognitiveCheck || false,
+      description: parsed.data.task,
+      taskType: parsed.data.taskType,
+      n: parsed.data.n || 5,
+      verify: parsed.data.verify !== false,
+      cognitiveCheck: parsed.data.cognitiveCheck || false,
     });
 
     return {

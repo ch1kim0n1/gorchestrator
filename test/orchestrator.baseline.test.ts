@@ -5,7 +5,11 @@ import { ReceiptRegistry } from '../src/core/receipt-registry.js';
 import { GORCHESTRATOR_RUBRIC_V1 } from '../src/core/gorchestrator-rubric.js';
 import { evaluateRegressionGates, loadRegressionBaselines } from '../src/core/regression-gates.js';
 
-describe('GOrchestrator Baseline Regression Tests', () => {
+jest.setTimeout(30000);
+
+const describeIfLLM = process.env.ANTHROPIC_API_KEY ? describe : describe.skip;
+
+describeIfLLM('GOrchestrator Baseline Regression Tests', () => {
   let orchestrator: GOrchestrator;
   let registry: ReceiptRegistry;
   const TOLERANCE = 0.05;

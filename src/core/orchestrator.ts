@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import { BudgetExceededError } from './errors.js';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -270,6 +271,10 @@ export class GOrchestrator {
     costUsd: number,
   ): Promise<void> {
     await this.costLedgerReady;
+    const budgetStatus = this.costLedger.getStatus();
+    if (budgetStatus.remaining_budget <= 0) {
+      throw new BudgetExceededError(`Budget exhausted before LLM call. Spent: $${budgetStatus.total_committed.toFixed(4)}, Max: $${budgetStatus.max_budget_usd.toFixed(4)}`);
+    }
     const reserveUsd = Math.max(costUsd, Number(process.env.GORCH_LLM_CALL_RESERVE_USD ?? 0.01));
     const reservation = this.costLedger.reserve('gorchestrator_llm_call', reserveUsd, Number(process.env.GORCH_LLM_RESERVATION_TTL_MS ?? 5 * 60 * 1000), {
       scope: 'execution',
@@ -556,11 +561,7 @@ export class GOrchestrator {
   }
 
   private createDyadPipeline(): DyadPipeline {
-    const detectorPool = new DetectorPool(this.llmClient, {
-      tier1_model: this.llmClient.getModelByTier('tier1'),
-      tier2_model: this.llmClient.getModelByTier('tier2'),
-      consensus_threshold: this.multiModelConfig.consensus_threshold,
-    });
+    const detectorPool = new DetectorPool();
     return new DyadPipeline({
       detectorPool,
       gtomEndpoint: this.gtomEndpoint,
