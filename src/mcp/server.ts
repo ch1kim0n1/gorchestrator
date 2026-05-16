@@ -578,8 +578,7 @@ class GOrchestratorMCPServer {
 }
 
 // Start server if run directly
-// @ts-ignore - CommonJS compatibility
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (require.main === module) {
   const server = new GOrchestratorMCPServer();
   server.start().catch((error) => coreLogger.error('GOrchestrator MCP Server failed', {
     error: error instanceof Error ? error.message : String(error),

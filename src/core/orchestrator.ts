@@ -561,7 +561,11 @@ export class GOrchestrator {
   }
 
   private createDyadPipeline(): DyadPipeline {
-    const detectorPool = new DetectorPool();
+    const detectorPool = new DetectorPool(this.llmClient, {
+      tier1_model: 'claude-haiku-4-5',
+      tier2_model: 'claude-sonnet-4-6',
+      consensus_threshold: 0.7,
+    });
     return new DyadPipeline({
       detectorPool,
       gtomEndpoint: this.gtomEndpoint,
