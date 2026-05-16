@@ -897,103 +897,31 @@ program
 program
   .command('trend')
   .description('Analyze performance trends over a sliding time window')
-  .option('--window <days>', 'Number of days to analyze', '7')
-  .option('--metric <name>', 'Specific metric to analyze (latency_ms, cost_usd, success_rate)')
+  .option('--window <n>', 'Number of recent samples to show', '20')
+  .option('--metric <name>', 'Specific metric to analyze (e.g. task_success_rate)', 'task_success_rate')
   .option('--corpus <path>', 'Path to corpus directory', './.gbrain-corpus')
   .option('--json', 'Output as JSON')
   .option('--quiet', 'Suppress output for CI use')
   .action(async (options: any) => {
     try {
-      const windowDays = parseInt(options.window);
-      if (isNaN(windowDays) || windowDays < 1 || windowDays > 365) {
-        console.error(chalk.red('Error: --window must be between 1 and 365 days'));
+      const windowSamples = parseInt(options.window);
+      if (isNaN(windowSamples) || windowSamples < 1 || windowSamples > 1000) {
+        console.error(chalk.red('Error: --window must be between 1 and 1000 samples'));
         process.exit(1);
       }
 
-      const { DriftDetector } = await import('../../shared/src/core/drift-detector.js');
-      const detector = new DriftDetector({
-        window_size: 100,
-        drift_threshold: 0.2,
-        alert_threshold: 0.3,
-        baseline_period_ms: windowDays * 24 * 60 * 60 * 1000,
-      });
-
-      // Generate sample metrics spanning the requested window
-      // In production, these would be loaded from the corpus / persistent store
-      const allMetrics = [
-        { name: 'latency_ms', base: 100, variance: 20 },
-        { name: 'cost_usd', base: 0.5, variance: 0.1 },
-        { name: 'success_rate', base: 0.9, variance: 0.05 },
-      ];
-
-      const metricsToAnalyze = options.metric
-        ? allMetrics.filter(m => m.name === options.metric)
-        : allMetrics;
-
-      if (options.metric && metricsToAnalyze.length === 0) {
-        console.error(chalk.red(`Error: Unknown metric "${options.metric}". Valid metrics: ${allMetrics.map(m => m.name).join(', ')}`));
-        process.exit(1);
-      }
-
-      const windowMs = windowDays * 24 * 60 * 60 * 1000;
-      const sampleCount = Math.min(windowDays * 10, 100);
-
-      metricsToAnalyze.forEach(metric => {
-        for (let i = 0; i < sampleCount; i++) {
-          const ageMs = windowMs * (1 - i / sampleCount);
-          const timestamp = new Date(Date.now() - ageMs).toISOString();
-          // Simulate a slight upward trend in the second half of the window
-          const trendFactor = i > sampleCount / 2 ? 1 + (i - sampleCount / 2) / sampleCount * 0.3 : 1;
-          const value = metric.base * trendFactor + (Math.random() - 0.5) * metric.variance;
-          detector['recordSnapshot'](metric.name, value, { timestamp });
-        }
-      });
-
-      const driftResults = detector.detectAllDrift();
-
-      // Build per-metric trend summaries
-      const summaries = metricsToAnalyze.map(metric => {
-        const drift = driftResults.find(d => d.metric_name === metric.name);
-        const rawTrend: string = drift?.trend ?? 'stable';
-        const trend: 'stable' | 'increasing' | 'decreasing' =
-          rawTrend === 'increasing' || rawTrend === 'decreasing' ? rawTrend : 'stable';
-
-        // Derive approximate means from base values and drift magnitude
-        const driftMagnitude = drift?.drift_magnitude ?? 0;
-        const currentMean = metric.base * (1 + driftMagnitude * (trend === 'decreasing' ? -1 : 1));
-        const baselineMean = metric.base;
-
-        return {
-          metric: metric.name,
-          window_days: windowDays,
-          trend,
-          current_mean: parseFloat(currentMean.toFixed(6)),
-          baseline_mean: parseFloat(baselineMean.toFixed(6)),
-          drift_magnitude: parseFloat((drift?.drift_magnitude ?? 0).toFixed(6)),
-          drift_detected: drift?.drift_detected ?? false,
-        };
-      });
+      const orchestrator = new GOrchestrator();
+      const samples = orchestrator.getDriftHistory(String(options.metric), windowSamples);
 
       if (options.json) {
-        const output = options.metric ? summaries[0] : { window_days: windowDays, metrics: summaries };
-        console.log(JSON.stringify(output, null, 2));
+        console.log(JSON.stringify({ metric: options.metric, window: windowSamples, samples }, null, 2));
       } else if (!options.quiet) {
         console.log(chalk.blue.bold('[GOrchestrator] Trend Analysis'));
-        console.log(chalk.gray(`Window: ${windowDays} day(s)`));
-        console.log('');
-
-        for (const s of summaries) {
-          const trendColor =
-            s.trend === 'increasing' ? chalk.yellow :
-            s.trend === 'decreasing' ? chalk.red :
-            chalk.green;
-          const driftFlag = s.drift_detected ? chalk.red(' [DRIFT]') : '';
-          console.log(chalk.bold(`  ${s.metric}`) + driftFlag);
-          console.log(chalk.gray(`    Trend:         ${trendColor(s.trend)}`));
-          console.log(chalk.gray(`    Current mean:  ${s.current_mean}`));
-          console.log(chalk.gray(`    Baseline mean: ${s.baseline_mean}`));
-          console.log(chalk.gray(`    Drift mag:     ${s.drift_magnitude}`));
-          console.log('');
+        console.log(chalk.gray(`Metric: ${options.metric}`));
+        console.log(chalk.gray(`Window: ${windowSamples} sample(s)`));
+        console.log('timestamp                          value    drift_detected');
+        for (const sample of samples) {
+          console.log(`${sample.timestamp}  ${sample.value.toFixed(4).padStart(7)}  ${sample.drift_detected ? 'yes' : 'no'}`);
         }
       }
 

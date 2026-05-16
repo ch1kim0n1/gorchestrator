@@ -17,6 +17,10 @@ import {
   MultiModelConfig,
   EscalationMetrics,
   TierConfig,
+  DeveloperTaskRequest,
+  DyadPipelineResult,
+  RelationshipAnalysisTask,
+  RelationshipAnalysisTaskSchema,
 } from '../types/index.js';
 import { determineConsensus, ConsensusResult, OutputComparison } from '../../../shared/src/core/consensus.js';
 import { IntakePrimer } from './intake.js';
@@ -40,6 +44,8 @@ import {
 } from './gbrain-integration.js';
 import { getDefaultSecretManager } from './security.js';
 import { ProgressEvent, TaskBackpressureLimiter } from './performance.js';
+import { DetectorPool } from './detector-pool.js';
+import { DyadPipeline } from './dyad-pipeline.js';
 
 export interface OrchestratorHealthStatus {
   status: 'healthy' | 'unhealthy';
@@ -85,6 +91,7 @@ export class GOrchestrator {
   private observability: GOrchestratorObservability;
   private taskLimiter: TaskBackpressureLimiter;
   private maxConcurrency: number;
+  private detectorConfidenceHistory: Map<string, number[]> = new Map();
 
   constructor(config: {
     gbrainEndpoint?: string;
@@ -283,33 +290,20 @@ export class GOrchestrator {
   /**
    * Main entry point: run a task through the full orchestration pipeline
    */
-  async runTask(rawTask: {
-    description: string;
-    taskType?: string;
-    surfaces?: string[];
-    constraints?: any[];
-    outcomeShape?: any;
-    budget?: any;
-    userContext?: string;
-    companyContext?: string;
-    n?: number;
-    verify?: boolean;
-    cognitiveCheck?: boolean;
-    priority?: 'normal' | 'high' | 'critical';
-    signal?: AbortSignal;
-    onProgress?: (event: ProgressEvent) => void;
-  }): Promise<OrchestratorRunRecord> {
+  async runTask(rawTask: RelationshipAnalysisTask): Promise<DyadPipelineResult>;
+  async runTask(rawTask: DeveloperTaskRequest): Promise<OrchestratorRunRecord>;
+  async runTask(rawTask: DeveloperTaskRequest | RelationshipAnalysisTask): Promise<OrchestratorRunRecord | DyadPipelineResult> {
     const start = performance.now();
     const startTime = Date.now();
     const span = this.observability.tracer.startSpan('GOrchestrator.runTask', {
-      task_type: rawTask.taskType,
-      priority: rawTask.priority || 'normal',
-      attempts: rawTask.n,
-    }, String((rawTask as any).traceparent || rawTask.userContext || ''));
+      task_type: (rawTask as any).taskType || (rawTask as any).task_type,
+      priority: (rawTask as any).priority || 'normal',
+      attempts: (rawTask as any).n,
+    }, String((rawTask as any).traceparent || (rawTask as any).userContext || ''));
     let currentTier = this.multiModelConfig.default_tier;
     let escalated = false;
-    const releaseProcessingSlot = await this.taskLimiter.acquire(rawTask.signal);
-    this.emitProgress(rawTask.onProgress, {
+    const releaseProcessingSlot = await this.taskLimiter.acquire((rawTask as any).signal);
+    this.emitProgress((rawTask as any).onProgress, {
       phase: 'queued',
       message: 'Task accepted by processing limiter',
       progress: 0.02,
@@ -317,48 +311,54 @@ export class GOrchestrator {
     });
 
     try {
-      this.throwIfCancelled(rawTask.signal);
+      this.throwIfCancelled((rawTask as any).signal);
+      if (this.isRelationshipAnalysisTask(rawTask)) {
+        const result = await this.runRelationshipAnalysisTask(rawTask, start, span.trace_id);
+        this.observability.tracer.endSpan(span);
+        return result;
+      }
+      const devTask = rawTask as DeveloperTaskRequest;
       // Update metrics
       this.escalationMetrics.total_tasks++;
       this.escalationMetrics.tier1_count++;
 
       // Phase 1: Intake & Priming
       this.logger.info('Phase 1: Intake & Priming (Tier 1)');
-      this.emitProgress(rawTask.onProgress, { phase: 'intake', message: 'Normalizing task and loading priors', progress: 0.1 });
-      const taskBundle = await this.intakePrimer.intakeTask(rawTask);
-      this.throwIfCancelled(rawTask.signal);
+      this.emitProgress(devTask.onProgress, { phase: 'intake', message: 'Normalizing task and loading priors', progress: 0.1 });
+      const taskBundle = await this.intakePrimer.intakeTask(devTask);
+      this.throwIfCancelled(devTask.signal);
 
       // Phase 2: Configuration Sampling
       this.logger.info('Phase 2: Configuration Sampling (Tier 1)');
-      this.emitProgress(rawTask.onProgress, { task_id: taskBundle.task_id, phase: 'sampling', message: 'Sampling agent configurations', progress: 0.22 });
+      this.emitProgress(devTask.onProgress, { task_id: taskBundle.task_id, phase: 'sampling', message: 'Sampling agent configurations', progress: 0.22 });
       const samplingStartTime = Date.now();
       const samplingPlan = await this.configSampler.sampleConfigurations(
         taskBundle,
-        rawTask.n
+        devTask.n
       );
-      this.throwIfCancelled(rawTask.signal);
+      this.throwIfCancelled(devTask.signal);
       const samplingDuration = Date.now() - samplingStartTime;
       this.escalationMetrics.tier1_avg_latency_ms = samplingDuration;
 
       // Phase 3: Parallel Execution
       this.logger.info('Phase 3: Parallel Execution');
-      this.emitProgress(rawTask.onProgress, { task_id: taskBundle.task_id, phase: 'execution', message: 'Running attempts with bounded concurrency', progress: 0.4, metadata: { maxConcurrency: this.maxConcurrency } });
+      this.emitProgress(devTask.onProgress, { task_id: taskBundle.task_id, phase: 'execution', message: 'Running attempts with bounded concurrency', progress: 0.4, metadata: { maxConcurrency: this.maxConcurrency } });
       const attemptResults = await this.runParallelAttempts(
         taskBundle,
         samplingPlan.configs,
-        rawTask.signal,
+        devTask.signal,
       );
-      this.throwIfCancelled(rawTask.signal);
+      this.throwIfCancelled(devTask.signal);
 
       // Phase 4: Scoring (if verification enabled)
       let scoredAttempts: ScoredAttempt[] = [];
-      if (rawTask.verify !== false) {
+      if (devTask.verify !== false) {
         this.logger.info('Phase 4: Scoring via GMirror (with escalation check)');
-        this.emitProgress(rawTask.onProgress, { task_id: taskBundle.task_id, phase: 'scoring', message: 'Scoring attempts and checking hard gates', progress: 0.62 });
+        this.emitProgress(devTask.onProgress, { task_id: taskBundle.task_id, phase: 'scoring', message: 'Scoring attempts and checking hard gates', progress: 0.62 });
         scoredAttempts = await this.scoreAttemptsWithEscalation(
           taskBundle,
           attemptResults,
-          rawTask.priority || 'normal'
+          devTask.priority || 'normal'
         );
 
         // Track escalation
@@ -398,7 +398,7 @@ export class GOrchestrator {
 
       // Phase 5: Selection
       this.logger.info('Phase 5: Selection');
-      this.emitProgress(rawTask.onProgress, { task_id: taskBundle.task_id, phase: 'selection', message: 'Selecting winning attempt', progress: 0.78 });
+      this.emitProgress(devTask.onProgress, { task_id: taskBundle.task_id, phase: 'selection', message: 'Selecting winning attempt', progress: 0.78 });
       const selectionResult = await this.selectorEngine.selectWinner(scoredAttempts);
 
       // Mark winner in attempts
@@ -411,15 +411,15 @@ export class GOrchestrator {
       }));
 
       // Phase 6: Cognitive Check (if enabled)
-      if (rawTask.cognitiveCheck) {
+      if (devTask.cognitiveCheck) {
         this.logger.info('Phase 6: Cognitive Check via GToM');
-        this.emitProgress(rawTask.onProgress, { task_id: taskBundle.task_id, phase: 'cognitive_check', message: 'Running cognitive conflict check', progress: 0.86 });
+        this.emitProgress(devTask.onProgress, { task_id: taskBundle.task_id, phase: 'cognitive_check', message: 'Running cognitive conflict check', progress: 0.86 });
         await this.performCognitiveCheck(taskBundle, scoredAttempts);
       }
 
       // Phase 7: Persistence
       this.logger.info('Phase 7: Persistence to GBrain');
-      this.emitProgress(rawTask.onProgress, { task_id: taskBundle.task_id, phase: 'persistence', message: 'Persisting run record and receipt', progress: 0.92 });
+      this.emitProgress(devTask.onProgress, { task_id: taskBundle.task_id, phase: 'persistence', message: 'Persisting run record and receipt', progress: 0.92 });
       const runRecord: OrchestratorRunRecord = {
         task_id: taskBundle.task_id,
         task_bundle: taskBundle,
@@ -475,10 +475,10 @@ export class GOrchestrator {
       await this.storeReceiptInGBrain(receipt);
 
       // Track success rate for drift detection
-      const successRate = scoredAttempts.filter(a => a.status === 'completed').length / scoredAttempts.length;
-      this.successRateHistory.push(successRate);
-      if (this.successRateHistory.length > 50) this.successRateHistory.shift();
-      this.saveSuccessRateHistory();
+      const successRate = scoredAttempts.length > 0
+        ? scoredAttempts.filter(a => a.status === 'completed').length / scoredAttempts.length
+        : 0;
+      this.recordTaskSuccessMetric(successRate);
 
       // Cleanup
       await this.sandboxManager.cleanup();
@@ -496,7 +496,7 @@ export class GOrchestrator {
         cost_usd: runRecord.total_cost.total_cost_usd,
         metadata: { attempts: scoredAttempts.length, gbrain_write_status: runRecord.gbrain_write_status },
       });
-      this.emitProgress(rawTask.onProgress, { task_id: runRecord.task_id, phase: 'complete', message: 'Task orchestration complete', progress: 1 });
+      this.emitProgress(devTask.onProgress, { task_id: runRecord.task_id, phase: 'complete', message: 'Task orchestration complete', progress: 1 });
       this.observability.tracer.endSpan(span);
       return runRecord;
     } catch (error) {
@@ -511,8 +511,9 @@ export class GOrchestrator {
         error: error instanceof Error ? error.message : String(error),
       });
       this.observability.tracer.endSpan(span, error instanceof Error ? error : new Error(String(error)));
-      if (rawTask.signal?.aborted) {
-        this.emitProgress(rawTask.onProgress, { phase: 'cancelled', message: 'Task orchestration cancelled', progress: 1 });
+      this.recordTaskSuccessMetric(0);
+      if ((rawTask as any).signal?.aborted) {
+        this.emitProgress((rawTask as any).onProgress, { phase: 'cancelled', message: 'Task orchestration cancelled', progress: 1 });
       }
       throw error;
     } finally {
@@ -520,14 +521,62 @@ export class GOrchestrator {
     }
   }
 
-  async *runTaskStream(rawTask: Parameters<GOrchestrator['runTask']>[0]): AsyncGenerator<ProgressEvent | { phase: 'result'; result: OrchestratorRunRecord }, void, unknown> {
+  private isRelationshipAnalysisTask(task: DeveloperTaskRequest | RelationshipAnalysisTask): task is RelationshipAnalysisTask {
+    return (task as RelationshipAnalysisTask).task_type === 'relationship_analysis';
+  }
+
+  private async runRelationshipAnalysisTask(
+    task: RelationshipAnalysisTask,
+    start: number,
+    traceId?: string,
+  ): Promise<DyadPipelineResult> {
+    const parsed = RelationshipAnalysisTaskSchema.parse(task);
+    const pipeline = this.createDyadPipeline();
+    const result = await pipeline.run(parsed);
+    this.recordTaskSuccessMetric(result.verdict === 'pass' ? 1 : 0, result);
+    await this.storeReceiptInGBrain(parsed, result);
+
+    const latencyMs = performance.now() - start;
+    this.latencyTracker.record(latencyMs);
+    this.observability.metrics.recordPublicMethod('runRelationshipAnalysisTask', latencyMs, 'ok');
+    this.auditLogger.logDecision({
+      operation: 'runRelationshipAnalysisTask',
+      decision: result.verdict,
+      correlation_id: parsed.dyad_id,
+      trace_id: traceId,
+      success: result.verdict === 'pass',
+      latency_ms: latencyMs,
+      cost_usd: result.cost_usd,
+      metadata: {
+        detector_count: result.detector_outputs.length,
+        gtom_risk: result.gtom_risk,
+      },
+    });
+    return result;
+  }
+
+  private createDyadPipeline(): DyadPipeline {
+    const detectorPool = new DetectorPool(this.llmClient, {
+      tier1_model: this.llmClient.getModelByTier('tier1'),
+      tier2_model: this.llmClient.getModelByTier('tier2'),
+      consensus_threshold: this.multiModelConfig.consensus_threshold,
+    });
+    return new DyadPipeline({
+      detectorPool,
+      gtomEndpoint: this.gtomEndpoint,
+      gmirrorEndpoint: this.gmirrorEndpoint,
+      logger: this.logger,
+    });
+  }
+
+  async *runTaskStream(rawTask: Parameters<GOrchestrator['runTask']>[0]): AsyncGenerator<ProgressEvent | { phase: 'result'; result: OrchestratorRunRecord | DyadPipelineResult }, void, unknown> {
     const events: ProgressEvent[] = [];
     let notify: (() => void) | undefined;
     let done = false;
     const taskPromise = this.runTask({
       ...rawTask,
       onProgress: (event) => {
-        rawTask.onProgress?.(event);
+        (rawTask as any).onProgress?.(event);
         events.push(event);
         notify?.();
       },
@@ -1245,6 +1294,55 @@ export class GOrchestrator {
     this.multiModelConfig = { ...this.multiModelConfig, ...config };
   }
 
+  private recordTaskSuccessMetric(successValue: number, dyadResult?: DyadPipelineResult): void {
+    const normalized = Number.isFinite(successValue) ? Math.max(0, Math.min(1, successValue)) : 0;
+    this.successRateHistory.push(normalized);
+    if (this.successRateHistory.length > 50) this.successRateHistory.shift();
+    this.saveSuccessRateHistory();
+
+    const recentHistory = this.successRateHistory.slice(-20);
+    if (recentHistory.length > 0) {
+      const rate = recentHistory.filter(value => value > 0.5).length / Math.min(20, recentHistory.length);
+      this.recordDriftMetric('task_success_rate', rate);
+      if (recentHistory.length >= 20 && rate < 0.6) {
+        this.auditLogger.logDecision({
+          operation: 'task_success_rate_drift',
+          decision: 'alert',
+          success: false,
+          metadata: { rate, window: 20 },
+        });
+      }
+    }
+
+    if (dyadResult && dyadResult.detector_outputs.length > 0) {
+      const avgConfidence = dyadResult.detector_outputs.reduce((sum, output) => sum + output.confidence, 0) / dyadResult.detector_outputs.length;
+      const metric = `detector_confidence:${dyadResult.dyad_id}`;
+      this.recordDriftMetric(metric, avgConfidence);
+      const history = this.detectorConfidenceHistory.get(metric) || [];
+      const previous = history[history.length - 1];
+      history.push(avgConfidence);
+      this.detectorConfidenceHistory.set(metric, history.slice(-20));
+      if (previous !== undefined && previous > 0 && (previous - avgConfidence) / previous > 0.2) {
+        this.auditLogger.logDecision({
+          operation: 'detector_confidence_drift',
+          decision: 'alert',
+          correlation_id: dyadResult.dyad_id,
+          success: false,
+          metadata: { previous, current: avgConfidence, metric },
+        });
+      }
+    }
+  }
+
+  private recordDriftMetric(metric: string, value: number): void {
+    const detector = this.driftDetector as any;
+    if (typeof detector.record === 'function') {
+      detector.record(metric, value);
+    } else {
+      this.driftDetector.recordSnapshot(metric, value);
+    }
+  }
+
   /**
    * Check if an endpoint is reachable
    */
@@ -1274,6 +1372,28 @@ export class GOrchestrator {
     }
     this.latencyTracker.record(performance.now() - start);
     return result;
+  }
+
+  getDriftHistory(metricName: string = 'task_success_rate', window: number = 20): Array<{ timestamp: string; value: number; drift_detected: boolean }> {
+    if (metricName !== 'task_success_rate') {
+      const values = this.detectorConfidenceHistory.get(metricName) || [];
+      return values.slice(-window).map((value, index, arr) => ({
+        timestamp: new Date(Date.now() - (arr.length - index - 1) * 1000).toISOString(),
+        value,
+        drift_detected: index > 0 && arr[index - 1] > 0 && (arr[index - 1] - value) / arr[index - 1] > 0.2,
+      }));
+    }
+
+    const history = this.successRateHistory.slice(-window);
+    return history.map((_, index) => {
+      const prefix = history.slice(0, index + 1);
+      const value = prefix.filter(item => item > 0.5).length / prefix.length;
+      return {
+        timestamp: new Date(Date.now() - (history.length - index - 1) * 1000).toISOString(),
+        value,
+        drift_detected: prefix.length >= 20 && value < 0.6,
+      };
+    });
   }
 
   /**
@@ -1500,7 +1620,33 @@ export class GOrchestrator {
   /**
    * Store receipt in gbrain quality control database
    */
-  private async storeReceiptInGBrain(receipt: ExecutionReceipt): Promise<void> {
+  private async storeReceiptInGBrain(receipt: ExecutionReceipt): Promise<void>;
+  private async storeReceiptInGBrain(task: RelationshipAnalysisTask, result: DyadPipelineResult): Promise<void>;
+  private async storeReceiptInGBrain(first: ExecutionReceipt | RelationshipAnalysisTask, result?: DyadPipelineResult): Promise<void> {
+    if (result && (first as RelationshipAnalysisTask).task_type === 'relationship_analysis') {
+      const task = first as RelationshipAnalysisTask;
+      if (!/^[a-f0-9]{16,64}$/i.test(task.dyad_id)) {
+        this.logger.error('Skipping DYAD GBrain persistence because dyad_id is not a hash', { dyad_id: task.dyad_id });
+        return;
+      }
+
+      try {
+        await this.gbrainClient.createPage({
+          title: `DYAD result: ${task.dyad_id}`,
+          content: this.redactForGBrain(result),
+          page_kind: 'dyad',
+          tags: ['relationship', task.dyad_id],
+        });
+      } catch (error) {
+        this.logger.warn('Failed to store DYAD result in GBrain', {
+          error: error instanceof Error ? error.message : String(error),
+          circuit: this.gbrainClient.getCircuitState(),
+        });
+      }
+      return;
+    }
+
+    const receipt = first as ExecutionReceipt;
     try {
       await this.gbrainClient.createPage({
         title: `Receipt: ${receipt.receipt_id}`,
@@ -1513,5 +1659,12 @@ export class GOrchestrator {
         circuit: this.gbrainClient.getCircuitState(),
       });
     }
+  }
+
+  private redactForGBrain(result: DyadPipelineResult): string {
+    const serialized = JSON.stringify(result, null, 2)
+      .replace(/\+?1?\s*\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/g, '[PHONE]')
+      .replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, '[EMAIL]');
+    return serialized;
   }
 }

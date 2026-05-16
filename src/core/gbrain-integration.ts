@@ -98,7 +98,7 @@ export class GBrainIntegrationClient {
     }, WriteAckSchema);
   }
 
-  async createPage(page: { title: string; content: string; tags: string[] }): Promise<{ page_id?: string; id?: string }> {
+  async createPage(page: { title: string; content: string; tags: string[]; page_kind?: string }): Promise<{ page_id?: string; id?: string }> {
     if (this.mode === 'mcp') {
       return this.callMcpTool('gbrain.create_page', page, PageAckSchema);
     }

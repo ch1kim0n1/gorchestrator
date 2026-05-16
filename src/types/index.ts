@@ -378,6 +378,123 @@ export const GMirrorScoringResponseSchema = z.object({
 
 export type GMirrorScoringResponse = z.infer<typeof GMirrorScoringResponseSchema>;
 
+// ============================================================================
+// DYAD Relationship Analysis Types
+// ============================================================================
+
+export const DetectorNameSchema = z.enum([
+  'emotion_labeling',
+  'bid_classification',
+  'repair_detection',
+  'labor_asymmetry',
+  'phantom_third_party',
+  'predictive_divergence',
+]);
+
+export type DetectorName = z.infer<typeof DetectorNameSchema>;
+
+export const RedactedMessageSchema = z.object({
+  message_id: z.string().optional(),
+  participant: z.enum(['a', 'b']),
+  text: z.string(),
+  timestamp: z.string().datetime(),
+  metadata: z.record(z.any()).optional(),
+});
+
+export type RedactedMessage = z.infer<typeof RedactedMessageSchema>;
+
+export const RelationshipAnalysisTaskSchema = z.object({
+  task_type: z.literal('relationship_analysis'),
+  dyad_id: z.string(),
+  message_window: z.array(RedactedMessageSchema),
+  detectors: z.array(DetectorNameSchema).min(1),
+  time_range: z.object({
+    start: z.string().datetime(),
+    end: z.string().datetime(),
+  }),
+  budget: z.object({
+    max_cost_usd: z.number().positive(),
+    max_latency_ms: z.number().int().positive(),
+  }),
+});
+
+export type RelationshipAnalysisTask = z.infer<typeof RelationshipAnalysisTaskSchema>;
+
+export const DetectorOutputSchema = z.object({
+  detector: DetectorNameSchema,
+  dyad_id: z.string(),
+  result: z.record(z.unknown()),
+  confidence: z.number().min(0).max(1),
+  model_used: z.string(),
+  cost_usd: z.number(),
+  latency_ms: z.number(),
+});
+
+export type DetectorOutput = z.infer<typeof DetectorOutputSchema>;
+
+export const ScoreResponseSchema = z.object({
+  insight_id: z.string().optional(),
+  attempt_id: z.string().optional(),
+  score: z.number().min(0).max(1).optional(),
+  confidence: z.number().min(0).max(1).optional(),
+  overall: z.enum(['pass', 'pass_with_warnings', 'risky', 'fail']).optional(),
+  scoring_mode: z.string().optional(),
+  scores: z.record(z.any()).optional(),
+  breakdown: z.record(z.any()).optional(),
+  timestamp: z.string().optional(),
+});
+
+export type ScoreResponse = z.infer<typeof ScoreResponseSchema>;
+
+export const DyadPipelineResultSchema = z.object({
+  dyad_id: z.string(),
+  detector_outputs: z.array(DetectorOutputSchema),
+  scoring_result: ScoreResponseSchema,
+  gtom_risk: z.number().min(0).max(1),
+  verdict: z.enum(['pass', 'fail', 'refused']),
+  reason: z.string().optional(),
+  cost_usd: z.number(),
+  latency_ms: z.number(),
+});
+
+export type DyadPipelineResult = z.infer<typeof DyadPipelineResultSchema>;
+
+export interface DeveloperTaskRequest {
+  description: string;
+  taskType?: string;
+  surfaces?: string[];
+  constraints?: any[];
+  outcomeShape?: any;
+  budget?: any;
+  userContext?: string;
+  companyContext?: string;
+  n?: number;
+  verify?: boolean;
+  cognitiveCheck?: boolean;
+  priority?: 'normal' | 'high' | 'critical';
+  signal?: AbortSignal;
+  onProgress?: (event: any) => void;
+}
+
+export type OrchestratorTask = DeveloperTaskRequest | RelationshipAnalysisTask;
+
+export interface RelationalInsightScoreRequest {
+  insight_id: string;
+  dyad_id: string;
+  scoring_mode: 'dyad_insight';
+  insight_type: 'emotion_label' | 'bid_classification' | 'repair_suggestion' | 'labor_asymmetry';
+  insight_text: string;
+  supporting_evidence: string[];
+  ethical_refusal_triggered: boolean;
+  confidence?: number;
+}
+
+export interface RelationalConflictPredictionResponse {
+  aggregate_risk: number;
+  conflicts?: Array<Record<string, unknown>>;
+  reason?: string;
+}
+
 export const GToMConflictPredictionRequestSchema = z.object({
   task: TaskBundleSchema,
   active_attempts: z.array(z.object({
