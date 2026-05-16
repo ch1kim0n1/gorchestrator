@@ -38,6 +38,7 @@ import {
   GBrainIntegrationClient,
   GBrainIntegrationMode,
 } from './gbrain-integration.js';
+import { getDefaultSecretManager } from './security.js';
 
 export interface OrchestratorHealthStatus {
   status: 'healthy' | 'unhealthy';
@@ -905,9 +906,12 @@ export class GOrchestrator {
   private async checkLLMApiHealth(): Promise<HealthCheckResult> {
     const start = performance.now();
     try {
-      if (process.env.ANTHROPIC_API_KEY) {
+      const secrets = getDefaultSecretManager();
+      const anthropicApiKey = secrets.get('anthropic_api_key');
+      const openaiApiKey = secrets.get('openai_api_key');
+      if (anthropicApiKey) {
         const Anthropic = (await import('@anthropic-ai/sdk')).default;
-        const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+        const client = new Anthropic({ apiKey: anthropicApiKey });
         const response = await client.messages.create({
           model: 'claude-haiku-4-5-20251001',
           max_tokens: 1,
@@ -915,9 +919,9 @@ export class GOrchestrator {
         });
         return this.result('llm_api', Boolean(response.id), start);
       }
-      if (process.env.OPENAI_API_KEY) {
+      if (openaiApiKey) {
         const OpenAI = (await import('openai')).default;
-        const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+        const client = new OpenAI({ apiKey: openaiApiKey });
         const response = await client.chat.completions.create({
           model: 'gpt-4o-mini',
           max_tokens: 1,

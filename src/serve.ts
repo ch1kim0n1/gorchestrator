@@ -1,5 +1,5 @@
 import { GOrchestratorMCPServer } from './mcp/server.js';
-import { HealthServer, type HealthCheckResult, type ReadinessCheckResult } from '../../shared/src/core/health-server.js';
+import { SecureHealthServer, type HealthCheckResult, type ReadinessCheckResult } from './core/public-health-server.js';
 import { coreLogger } from './core/observability.js';
 
 const HEALTH_PORT = process.env.HEALTH_PORT ? parseInt(process.env.HEALTH_PORT, 10) : 8080;
@@ -8,7 +8,7 @@ async function main() {
   const server = new GOrchestratorMCPServer();
 
   // Create health server
-  const healthServer = new HealthServer(
+  const healthServer = new SecureHealthServer(
     async (): Promise<HealthCheckResult> => ({
       status: 'healthy',
       timestamp: new Date().toISOString(),

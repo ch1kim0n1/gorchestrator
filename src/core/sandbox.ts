@@ -6,6 +6,7 @@ import {
   SandboxState,
 } from '../types/index.js';
 import { coreLogger } from './observability.js';
+import { sanitizeCliPath, sanitizeCliString } from './security.js';
 
 /**
  * Sandbox Pool Manager
@@ -165,7 +166,15 @@ export class SandboxPoolManager {
         if (code === 0) {
           resolve({ stdout, stderr });
         } else {
-          reject(new Error(`Command failed with code ${code}: ${stderr}`));
+          const error = new Error(`Command failed with code ${code}: ${stderr}`) as Error & {
+            stdout?: string;
+            stderr?: string;
+            code?: number | null;
+          };
+          error.stdout = stdout;
+          error.stderr = stderr;
+          error.code = code;
+          reject(error);
         }
       });
 
@@ -288,19 +297,7 @@ export class SandboxPoolManager {
       return { stdout: `[MOCK] ${command}`, stderr: '', exitCode: 0 };
     }
     const containerName = `gorch-${sandbox.sandbox_id}`;
-    const workDir = cwd || '/workspace';
-
-    // Use array-form arguments to prevent shell injection
-    // Escape the workDir and command to prevent shell metacharacter injection
-    const escapedWorkDir = workDir.replace(/'/g, "'\\''");
-    const escapedCommand = command.replace(/'/g, "'\\''");
-    const dockerArgs = [
-      'exec',
-      containerName,
-      'sh',
-      '-c',
-      `cd '${escapedWorkDir}' && ${escapedCommand}`
-    ];
+    const dockerArgs = this.buildDockerExecArgs(containerName, command, cwd);
     
     try {
       const { stdout, stderr } = await this.execSafe('docker', dockerArgs);
@@ -360,12 +357,10 @@ export class SandboxPoolManager {
     }
 
     const containerName = `gorch-${sandbox.sandbox_id}`;
-    const workDir = cwd || '/workspace';
+    const dockerArgs = this.buildDockerExecArgs(containerName, command, cwd);
     
     return new Promise((resolve, reject) => {
-      const process = spawn('docker', [
-        'exec', containerName, 'sh', '-c', `cd ${workDir} && ${command}`
-      ]);
+      const process = spawn('docker', dockerArgs);
 
       let stdout = '';
       let stderr = '';
@@ -459,6 +454,7 @@ export class SandboxPoolManager {
       '--name', containerName,
       '--cpus', String(sandbox.config.resource_limits.cpu_cores),
       '--memory', `${sandbox.config.resource_limits.memory_mb}m`,
+      '--network', sandbox.config.network_isolation ? 'none' : 'bridge',
       snapshotName,
       'tail', '-f', '/dev/null',
     ];
@@ -553,6 +549,19 @@ export class SandboxPoolManager {
           });
       }
     }
+  }
+
+  private buildDockerExecArgs(containerName: string, command: string, cwd?: string): string[] {
+    const workDir = sanitizeCliPath(cwd || '/workspace', 'sandbox cwd');
+    const safeCommand = sanitizeCliString(command, 'sandbox command', 20000);
+    return [
+      'exec',
+      '-w', workDir,
+      containerName,
+      'sh',
+      '-lc',
+      safeCommand,
+    ];
   }
 
   /**

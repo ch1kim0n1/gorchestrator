@@ -5,7 +5,8 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { GOrchestrator } from '../core/orchestrator.js';
-import { coreLogger } from '../core/observability.js';
+import { coreLogger, LocalAuditLogger } from '../core/observability.js';
+import { getDefaultSecretManager, PermissionModel } from '../core/security.js';
 import { createAuthMiddleware, type AuthConfig, type AuthToken } from '../../../shared/src/core/token-auth.js';
 
 type McpScope = 'read' | 'write';
@@ -40,6 +41,8 @@ class GOrchestratorMCPServer {
   private rateLimitRph: number;
   private bootstrapToken?: string;
   private bootstrapScopes: McpScope[];
+  private permissions: PermissionModel;
+  private securityAudit: LocalAuditLogger;
 
   constructor(authConfig?: AuthConfig) {
     this.server = new Server(
@@ -57,14 +60,17 @@ class GOrchestratorMCPServer {
     this.orchestrator = new GOrchestrator();
 
     const env = typeof process !== 'undefined' ? process.env : {};
+    const secrets = getDefaultSecretManager();
     this.requireAuth = env.GORCHESTRATOR_REQUIRE_AUTH === 'true';
     this.allowAnonymousRead = env.GORCHESTRATOR_ALLOW_ANONYMOUS_READ !== 'false';
     this.defaultScopes = this.parseScopes(env.GORCHESTRATOR_MCP_DEFAULT_SCOPES || 'read,write');
-    this.bootstrapToken = env.GORCHESTRATOR_MCP_TOKEN;
+    this.bootstrapToken = secrets.get('gorchestrator_mcp_token');
     this.bootstrapScopes = this.parseScopes(env.GORCHESTRATOR_MCP_TOKEN_SCOPES || 'read,write');
+    this.permissions = PermissionModel.loadDefault();
+    this.securityAudit = new LocalAuditLogger('gorchestrator');
 
     this.authMiddleware = createAuthMiddleware(authConfig || {
-      secret: env.GORCHESTRATOR_AUTH_SECRET || 'dev-secret-key',
+      secret: secrets.get('gorchestrator_auth_secret') || 'dev-secret-key',
       tool: 'gorchestrator',
       defaultRoles: this.defaultScopes,
     });
@@ -229,11 +235,26 @@ class GOrchestratorMCPServer {
       const requiredScope = this.requiredScopeForTool(name);
       const auth = this.authorize(request.params._meta, requiredScope);
       if (!auth.ok) {
+        this.securityAudit.logSecurityEvent({
+          event: 'mcp_auth_denied',
+          target: name,
+          scope: requiredScope,
+          success: false,
+          error: auth.error,
+        });
         return this.errorResponse(auth.error);
       }
 
       const rateLimit = this.checkRateLimit(auth.token);
       if (!rateLimit.allowed) {
+        this.securityAudit.logSecurityEvent({
+          event: 'mcp_rate_limited',
+          actor: this.tokenLabel(auth.token),
+          target: name,
+          scope: requiredScope,
+          success: false,
+          metadata: { reset_at: rateLimit.resetAt },
+        });
         return this.errorResponse(`Rate limit exceeded. Reset at ${rateLimit.resetAt}`);
       }
 
@@ -270,6 +291,13 @@ class GOrchestratorMCPServer {
     this.issuedTokens.set(token.token, {
       scopes: this.parseScopes(token.roles.join(',')),
       expiresAt: new Date(token.expiresAt).getTime(),
+    });
+    this.securityAudit.logSecurityEvent({
+      event: 'mcp_token_issued',
+      actor: this.tokenLabel(token.token),
+      scope: token.roles.join(','),
+      success: true,
+      metadata: { expires_at: token.expiresAt },
     });
     return token;
   }
@@ -310,7 +338,8 @@ class GOrchestratorMCPServer {
     if (this.bootstrapToken) {
       return [];
     }
-    return this.parseScopes(fallbackRoles.join(','));
+    const fallback = this.parseScopes(fallbackRoles.join(','));
+    return this.permissions.scopesForToken(token, fallback).filter((scope): scope is McpScope => scope === 'read' || scope === 'write');
   }
 
   private requiredScopeForTool(name: string): McpScope {
@@ -355,6 +384,10 @@ class GOrchestratorMCPServer {
   private parseLimit(value: string | undefined, fallback: number): number {
     const parsed = Number.parseInt(value || '', 10);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+  }
+
+  private tokenLabel(token: string): string {
+    return token === 'anonymous-read' ? token : `token:${this.authMiddleware.getAuth().hashToken(token)}`;
   }
 
   private errorResponse(text: string) {

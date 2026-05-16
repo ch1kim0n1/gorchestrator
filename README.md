@@ -53,6 +53,7 @@ gorchestrator history
 | `drift` | Check drift detector output |
 | `cost` | Inspect budget ledger spend |
 | `metrics` | Export Prometheus, OpenTelemetry, or JSON observability data |
+| `secrets rotate`, `secrets list` | Rotate and inspect local secret-manager records without printing values |
 | `backup`, `restore`, `export` | Operate on persisted state |
 
 `gorchestrator sync --incremental` emits gstack-compatible stage results, registers each
@@ -210,6 +211,10 @@ npm run test:coverage       # With coverage report
 - `GTOM_ENDPOINT` — Override GToM endpoint
 - `GORCHESTRATOR_SYNC_ROOT` - Override the `gstack-gbrain-sync` lock and state directory
 - `GORCHESTRATOR_TOOL_<NAME>_PATH` - Override a source path for `gbrain`, `gstack`, `gorchestrator`, `gmirror`, `gtom`, or `glearn`
+- `GORCHESTRATOR_SECRET_DIR` - Override the local file-backed secret-manager directory
+- `GORCHESTRATOR_PERMISSIONS_FILE` - JSON file mapping token hashes to allowed MCP scopes
+- `GORCHESTRATOR_HEALTH_RATE_LIMIT_RPM` - Rate limit for public health endpoints
+- `GORCHESTRATOR_HEALTH_SHUTDOWN_TOKEN` - Legacy env fallback for the `health_shutdown_token` secret
 - `MOCK_SANDBOX` — Set to `1` to use mock sandbox mode (for testing)
 - `MAX_CONCURRENCY` — Override max concurrent sandboxes
 

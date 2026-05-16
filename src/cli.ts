@@ -5,6 +5,13 @@ import chalk from 'chalk';
 import { GOrchestrator } from './core/orchestrator.js';
 import { OrchestratorPersistenceManager } from './core/orchestrator-persistence.js';
 import { GStackGBrainSync } from './core/gstack-gbrain-sync.js';
+import {
+  getDefaultSecretManager,
+  sanitizeCliInteger,
+  sanitizeCliPath,
+  sanitizeCliString,
+  sanitizeCliUrl,
+} from './core/security.js';
 
 const program = new Command();
 
@@ -71,6 +78,54 @@ program
     }
   });
 
+const secretsCommand = program
+  .command('secrets')
+  .description('Manage GOrchestrator local secret-manager records');
+
+secretsCommand
+  .command('rotate <name>')
+  .description('Rotate or set a secret-manager value')
+  .option('--value <value>', 'Explicit secret value; omit to generate a new high-entropy value')
+  .option('--json', 'Output as JSON')
+  .option('--quiet', 'Suppress output for CI use')
+  .action((name: string, options: any) => {
+    try {
+      const manager = getDefaultSecretManager();
+      const record = manager.rotate(name, options.value ? sanitizeCliString(options.value, 'secret value', 8192) : undefined);
+      const output = {
+        name: record.name,
+        version: record.version,
+        rotated_at: record.rotated_at,
+        path: manager.pathFor(record.name),
+      };
+      if (options.json) {
+        console.log(JSON.stringify(output, null, 2));
+      } else if (!options.quiet) {
+        console.log(chalk.green(`Secret rotated: ${record.name} v${record.version}`));
+        console.log(chalk.gray(`Path: ${output.path}`));
+      }
+    } catch (error) {
+      console.error(chalk.red(`Secret rotation failed: ${error instanceof Error ? error.message : String(error)}`));
+      process.exit(1);
+    }
+  });
+
+secretsCommand
+  .command('list')
+  .description('List configured secret-manager records without values')
+  .option('--json', 'Output as JSON')
+  .option('--quiet', 'Suppress output for CI use')
+  .action((options: any) => {
+    const records = getDefaultSecretManager().list();
+    if (options.json) {
+      console.log(JSON.stringify(records, null, 2));
+    } else if (!options.quiet) {
+      for (const record of records) {
+        console.log(`${record.name}\tv${record.version}\t${record.source}\t${record.rotated_at}`);
+      }
+    }
+  });
+
 program
   .command('metrics')
   .description('Export GOrchestrator observability metrics')
@@ -112,36 +167,23 @@ program
   .option('--quiet', 'Suppress output for CI use')
   .action(async (task, options) => {
     // Basic input validation
-    if (!task || typeof task !== 'string' || task.trim().length === 0) {
+    task = sanitizeCliString(task, 'task', 10000).trim();
+    if (!task) {
       console.error(chalk.red('Error: Task must be a non-empty string'));
       process.exit(1);
     }
 
-    if (task.length > 10000) {
-      console.error(chalk.red('Error: Task description too long (max 10000 characters)'));
-      process.exit(1);
-    }
-
-    if (task.includes('\0')) {
-      console.error(chalk.red('Error: Task contains invalid characters'));
-      process.exit(1);
-    }
-
-    const attempts = parseInt(options.attempts);
-    if (isNaN(attempts) || attempts < 1 || attempts > 100) {
-      console.error(chalk.red('Error: Attempts must be between 1 and 100'));
-      process.exit(1);
-    }
-    const cycles = parseInt(options.cycles);
-    if (isNaN(cycles) || cycles < 1 || cycles > 100) {
-      console.error(chalk.red('Error: Cycles must be between 1 and 100'));
-      process.exit(1);
-    }
+    const attempts = sanitizeCliInteger(options.attempts, 'attempts', 1, 100);
+    const cycles = sanitizeCliInteger(options.cycles, 'cycles', 1, 100);
     const budgetUsd = parseFloat(options.budgetUsd);
     if (isNaN(budgetUsd) || budgetUsd <= 0) {
       console.error(chalk.red('Error: Budget must be a positive number'));
       process.exit(1);
     }
+    options.gbrain = sanitizeCliUrl(options.gbrain, 'gbrain endpoint');
+    options.gmirror = sanitizeCliUrl(options.gmirror, 'gmirror endpoint');
+    options.gtom = sanitizeCliUrl(options.gtom, 'gtom endpoint');
+    options.gstack = sanitizeCliUrl(options.gstack, 'gstack endpoint');
 
     if (!options.quiet) {
       console.log(chalk.blue.bold('[GOrchestrator] Starting orchestration run'));
@@ -163,8 +205,9 @@ program
     try {
       let taskDescription = task;
       if (options.taskFile) {
+        const taskFile = sanitizeCliPath(options.taskFile, 'task file');
         const fs = await import('fs/promises');
-        const fileContent = await fs.readFile(options.taskFile, 'utf-8');
+        const fileContent = await fs.readFile(taskFile, 'utf-8');
         taskDescription = fileContent.trim();
       }
 
@@ -997,6 +1040,9 @@ function buildCompletionScript(shell: string): string | null {
     'restore',
     'export',
     'metrics',
+    'secrets',
+    'rotate',
+    'list',
     'run',
     'health',
     'sync',
@@ -1032,6 +1078,7 @@ function buildCompletionScript(shell: string): string | null {
     '--incremental',
     '--full',
     '--dry-run',
+    '--value',
   ];
   const words = [...commands, ...options].join(' ');
 
