@@ -1,5 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import chalk from 'chalk';
+import { saveRun } from '../db.js';
+import { randomUUID } from 'crypto';
 
 export interface BestOfOptions {
   n: number;
@@ -7,6 +9,7 @@ export interface BestOfOptions {
   scorerModel: string;
   system?: string;
   json: boolean;
+  maxCost?: number;
 }
 
 const MODEL_COSTS: Record<string, [number, number]> = {
@@ -68,6 +71,19 @@ export async function bestOfCommand(task: string, options: BestOfOptions): Promi
   const client = new Anthropic({ apiKey });
   const [inRate, outRate] = MODEL_COSTS[options.model] ?? [3.0, 15.0];
 
+  if (options.maxCost !== undefined) {
+    // Estimate: ~1000 input tokens + 2048 output per attempt
+    const estimatedCost = options.n * (1000 * inRate + 2048 * outRate) / 1_000_000;
+    if (estimatedCost > options.maxCost) {
+      console.error(chalk.red(`Budget check: estimated cost ~$${estimatedCost.toFixed(4)} exceeds --max-cost $${options.maxCost.toFixed(4)}`));
+      console.error(chalk.gray(`To proceed anyway, remove --max-cost or increase the limit.`));
+      process.exit(1);
+    }
+    if (!options.json) {
+      console.log(chalk.gray(`Budget: ~$${estimatedCost.toFixed(4)} estimated / $${options.maxCost.toFixed(4)} limit`));
+    }
+  }
+
   if (!options.json) {
     console.log(chalk.blue(`Running ${options.n} parallel attempts...`));
     console.log(chalk.gray(`Generator: ${options.model} | Scorer: ${options.scorerModel}`));
@@ -112,6 +128,17 @@ export async function bestOfCommand(task: string, options: BestOfOptions): Promi
   const winner = attempts[0]!;
   const totalCost = attempts.reduce((s, a) => s + a.cost_usd, 0);
   const totalTokens = attempts.reduce((s, a) => s + a.input_tokens + a.output_tokens, 0);
+
+  // Persist winner to local run history
+  saveRun({
+    run_id: randomUUID(),
+    task,
+    output: winner.output,
+    score: winner.score,
+    model: options.model,
+    cost_usd: totalCost,
+    timestamp: new Date().toISOString(),
+  });
 
   if (options.json) {
     console.log(JSON.stringify({ winner, all_attempts: attempts, total_cost_usd: totalCost, total_tokens: totalTokens }, null, 2));

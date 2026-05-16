@@ -4,6 +4,8 @@ import { Command } from 'commander';
 import chalk from 'chalk';
 import { GOrchestrator } from './core/orchestrator.js';
 import { bestOfCommand } from './commands/best-of.js';
+import { regressCommand } from './commands/regress.js';
+import { trendCommand } from './commands/trend.js';
 import { OrchestratorPersistenceManager } from './core/orchestrator-persistence.js';
 import { GStackGBrainSync } from './core/gstack-gbrain-sync.js';
 import {
@@ -593,120 +595,19 @@ program
 
 // Regress command
 program
-  .command('regress')
-  .description('Compare current performance against baseline')
-  .option('-b, --baseline <path>', 'Path to baseline file')
-  .option('-c, --corpus <path>', 'Path to test corpus JSON')
-  .option('--gbrain <url>', 'GBrain endpoint', 'http://localhost:3000')
-  .option('--tolerance <number>', 'Tolerance for regression detection', '0.05')
-  .option('--baseline-file <path>', 'Versioned JSONL baseline file for per-dimension regression gates', 'gorchestrator/test/baselines/regression-baselines.jsonl')
-  .option('--against <receipt>', 'Compare latest receipt against a baseline receipt path or ID')
+  .command('regress <task>')
+  .description('Test for regression against a baseline run')
+  .option('-b, --baseline <run_id>', 'Baseline run ID to compare against (or "last")', 'last')
+  .option('-m, --model <model>', 'Model to use', 'claude-haiku-4-5-20251001')
+  .option('-t, --threshold <n>', 'Regression threshold (relative score below this = regression)', (v: string) => parseFloat(v), 0.85)
   .option('--json', 'Output as JSON')
-  .option('--quiet', 'Suppress output for CI use')
-  .action(async (options: any) => {
-    try {
-      if (options.against) {
-        await runReceiptRegression(options.against, options);
-        return;
-      }
-
-      if (options.baselineFile) {
-        const { ReceiptRegistry } = await import('./core/receipt-registry.js');
-        const { loadRegressionBaselines, evaluateRegressionGates } = await import('./core/regression-gates.js');
-        const receiptRegistry = new ReceiptRegistry('gorchestrator');
-        const latest = await receiptRegistry.getLatest();
-        if (latest) {
-          const baselines = await loadRegressionBaselines(options.baselineFile);
-          const gate = evaluateRegressionGates(latest, baselines);
-          if (options.json) {
-            console.log(JSON.stringify(gate, null, 2));
-          } else if (!options.quiet) {
-            console.log(chalk.blue.bold('[GOrchestrator] Regression Gates'));
-            for (const result of gate.results) {
-              const status = result.passed ? chalk.green('PASSED') : chalk.red('FAILED');
-              console.log(`  ${result.dimension}: ${status} current=${result.current.toFixed(4)} baseline=${result.baseline.toFixed(4)} tolerance=${result.tolerance}`);
-            }
-          }
-          process.exit(gate.passed ? 0 : 1);
-        }
-      }
-
-      const tolerance = parseFloat(options.tolerance);
-      if (isNaN(tolerance) || tolerance < 0 || tolerance > 1) {
-        console.error(chalk.red('[GOrchestrator] --tolerance must be a number between 0 and 1'));
-        process.exit(1);
-      }
-
-      if (!options.baseline) {
-        console.error(chalk.red('[GOrchestrator] --baseline is required'));
-        process.exit(1);
-      }
-
-      if (!options.corpus) {
-        console.error(chalk.red('[GOrchestrator] --corpus is required'));
-        process.exit(1);
-      }
-
-      const fs = await import('fs/promises');
-      const baselineContent = await fs.readFile(options.baseline, 'utf-8');
-      const baseline = JSON.parse(baselineContent);
-      const corpusContent = await fs.readFile(options.corpus, 'utf-8');
-      const corpus = JSON.parse(corpusContent);
-
-      const orchestrator = new GOrchestrator({
-        gbrainEndpoint: options.gbrain,
-      });
-
-      // Run current performance on corpus
-      const currentResults = [];
-      for (const testCase of corpus.slice(0, 10)) {
-        const result = await orchestrator.runTask({
-          description: testCase.task || testCase.description,
-          taskType: testCase.type,
-          n: 1,
-          verify: false,
-          cognitiveCheck: false,
-        });
-        currentResults.push({
-          task_id: result.task_id,
-          winner: result.winner,
-          total_cost_usd: result.total_cost?.total_cost_usd || 0,
-        });
-      }
-
-      // Compare with baseline
-      const baselineAvgCost = baseline.average_cost_usd || 0;
-      const currentAvgCost = currentResults.reduce((sum, r) => sum + r.total_cost_usd, 0) / currentResults.length;
-      const costDelta = currentAvgCost - baselineAvgCost;
-      const regressionDetected = costDelta > baselineAvgCost * tolerance;
-
-      const result = {
-        baseline_avg_cost_usd: baselineAvgCost,
-        current_avg_cost_usd: currentAvgCost,
-        cost_delta_usd: costDelta,
-        tolerance,
-        regression_detected: regressionDetected,
-        current_results_count: currentResults.length,
-      };
-
-      if (options.json) {
-        console.log(JSON.stringify(result, null, 2));
-      } else if (!options.quiet) {
-        console.log(chalk.blue.bold('[GOrchestrator] Running regression test'));
-        console.log(chalk.gray(`Baseline avg cost: $${baselineAvgCost.toFixed(4)}`));
-        console.log(chalk.gray(`Current avg cost: $${currentAvgCost.toFixed(4)}`));
-        console.log(chalk.gray(`Delta: $${costDelta.toFixed(4)}`));
-        console.log(chalk.gray(`Tolerance: ${(tolerance * 100).toFixed(1)}%`));
-        const statusColor = regressionDetected ? 'red' : 'green';
-        const statusLabel = regressionDetected ? '✗ REGRESSION DETECTED' : '✓ PASSED';
-        console.log(chalk[statusColor](`Status: ${statusLabel}`));
-      }
-
-      process.exit(regressionDetected ? 1 : 0);
-    } catch (error) {
-      console.error(chalk.red('[GOrchestrator] Regression test failed:'), error);
-      process.exit(1);
-    }
+  .action(async (task: string, opts: any) => {
+    await regressCommand(task, {
+      baseline: opts.baseline,
+      model: opts.model,
+      threshold: opts.threshold,
+      json: opts.json ?? false,
+    });
   });
 
 // Attempts command
@@ -897,40 +798,14 @@ program
 // Trend command
 program
   .command('trend')
-  .description('Analyze performance trends over a sliding time window')
-  .option('--window <n>', 'Number of recent samples to show', '20')
-  .option('--metric <name>', 'Specific metric to analyze (e.g. task_success_rate)', 'task_success_rate')
-  .option('--corpus <path>', 'Path to corpus directory', './.gbrain-corpus')
+  .description('Show score trend over recent best-of runs')
+  .option('-n, --runs <n>', 'Number of recent runs to analyze', (v: string) => parseInt(v, 10), 50)
   .option('--json', 'Output as JSON')
-  .option('--quiet', 'Suppress output for CI use')
-  .action(async (options: any) => {
-    try {
-      const windowSamples = parseInt(options.window);
-      if (isNaN(windowSamples) || windowSamples < 1 || windowSamples > 1000) {
-        console.error(chalk.red('Error: --window must be between 1 and 1000 samples'));
-        process.exit(1);
-      }
-
-      const orchestrator = new GOrchestrator();
-      const samples = orchestrator.getDriftHistory(String(options.metric), windowSamples);
-
-      if (options.json) {
-        console.log(JSON.stringify({ metric: options.metric, window: windowSamples, samples }, null, 2));
-      } else if (!options.quiet) {
-        console.log(chalk.blue.bold('[GOrchestrator] Trend Analysis'));
-        console.log(chalk.gray(`Metric: ${options.metric}`));
-        console.log(chalk.gray(`Window: ${windowSamples} sample(s)`));
-        console.log('timestamp                          value    drift_detected');
-        for (const sample of samples) {
-          console.log(`${sample.timestamp}  ${sample.value.toFixed(4).padStart(7)}  ${sample.drift_detected ? 'yes' : 'no'}`);
-        }
-      }
-
-      process.exit(0);
-    } catch (error) {
-      console.error(chalk.red('[GOrchestrator] Trend analysis failed:'), error);
-      process.exit(1);
-    }
+  .action(async (opts: any) => {
+    await trendCommand({
+      runs: opts.runs,
+      json: opts.json ?? false,
+    });
   });
 
 program
@@ -961,6 +836,7 @@ program
   .option('-m, --model <model>', 'Generator model', 'claude-haiku-4-5-20251001')
   .option('--scorer-model <model>', 'Scorer model', 'claude-haiku-4-5-20251001')
   .option('-s, --system <prompt>', 'System prompt override')
+  .option('--max-cost <usd>', 'Abort if estimated cost exceeds this amount', parseFloat)
   .option('--json', 'Output as JSON')
   .action(async (task: string, opts: any) => {
     await bestOfCommand(task, {
@@ -968,6 +844,7 @@ program
       model: opts.model,
       scorerModel: opts.scorerModel,
       system: opts.system,
+      maxCost: opts.maxCost,
       json: opts.json ?? false,
     });
   });
