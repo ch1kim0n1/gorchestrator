@@ -10,8 +10,7 @@
  * - cost: Analyze cost metrics
  */
 
-import { ReplayManager } from '@gstack/shared/core';
-import { CostLedger } from '@gstack/shared/core';
+import { ReplayManager, CostLedger } from './core/shared-utils.js';
 
 export interface EvalOptions {
   task: string;

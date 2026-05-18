@@ -11,7 +11,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import { encoding_for_model, get_encoding, TiktokenModel } from 'tiktoken';
-import { createLogger } from '@gstack/shared/core';
+import { createLogger } from './shared-utils.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { coreLogger } from './observability.js';
