@@ -1,0 +1,483 @@
+openapi: 3.0.3
+info:
+  title: GOrchestrator API
+  description: |
+    GOrchestrator turns a single task into N parallel attempts, runs each in an isolated sandbox with its own agent configuration, scores the outputs against verifiable criteria, and selects or merges the winner.
+  version: 1.0.0
+  contact:
+    name: G-Stack Team
+    url: https://github.com/gstack/gorchestrator
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:3000
+    description: Local development server
+  - url: https://api.gorchestrator.gstack.dev
+    description: Production server
+
+tags:
+  - name: Tasks
+    description: Task execution and management
+  - name: Health
+    description: Health and status endpoints
+  - name: Metrics
+    description: Observability and metrics
+  - name: Configuration
+    description: Configuration management
+
+paths:
+  /health/live:
+    get:
+      summary: Liveness probe
+      description: Returns 200 if the service is alive
+      operationId: getLiveness
+      tags:
+        - Health
+      responses:
+        '200':
+          description: Service is alive
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: healthy
+        '503':
+          description: Service is not healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /health/ready:
+    get:
+      summary: Readiness probe
+      description: Returns 200 if the service is ready to accept traffic
+      operationId: getReadiness
+      tags:
+        - Health
+      responses:
+        '200':
+          description: Service is ready
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ready
+                  checks:
+                    type: object
+                    properties:
+                      database:
+                        type: string
+                        example: healthy
+                      gbrain:
+                        type: string
+                        example: healthy
+        '503':
+          description: Service is not ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /tasks:
+    post:
+      summary: Execute a task
+      description: Run a task with parallel attempts and return the best result
+      operationId: executeTask
+      tags:
+        - Tasks
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskRequest'
+      responses:
+        '200':
+          description: Task completed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskResponse'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /tasks/{taskId}:
+    get:
+      summary: Get task status
+      description: Retrieve the status and results of a task
+      operationId: getTask
+      tags:
+        - Tasks
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Unique task identifier
+      responses:
+        '200':
+          description: Task details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskResponse'
+        '404':
+          description: Task not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /tasks/{taskId}/cancel:
+    post:
+      summary: Cancel a task
+      description: Cancel a running task
+      operationId: cancelTask
+      tags:
+        - Tasks
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Task cancelled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  taskId:
+                    type: string
+                  status:
+                    type: string
+                    example: cancelled
+        '404':
+          description: Task not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Task already completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /metrics:
+    get:
+      summary: Get metrics
+      description: Return Prometheus-compatible metrics
+      operationId: getMetrics
+      tags:
+        - Metrics
+      responses:
+        '200':
+          description: Metrics in Prometheus format
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: |
+                gorchestrator_task_execution_total{status="success"} 1234
+                gorchestrator_task_execution_duration_seconds 0.5
+
+  /metrics/otel:
+    get:
+      summary: Get OpenTelemetry metrics
+      description: Return OpenTelemetry-compatible metrics
+      operationId: getOtelMetrics
+      tags:
+        - Metrics
+      responses:
+        '200':
+          description: Metrics in OpenTelemetry format
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /config:
+    get:
+      summary: Get configuration
+      description: Retrieve current configuration
+      operationId: getConfig
+      tags:
+        - Configuration
+      responses:
+        '200':
+          description: Current configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Configuration'
+        '403':
+          description: Forbidden - insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /config:
+    put:
+      summary: Update configuration
+      description: Update configuration values
+      operationId: updateConfig
+      tags:
+        - Configuration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfigurationUpdate'
+      responses:
+        '200':
+          description: Configuration updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Configuration'
+        '400':
+          description: Invalid configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Forbidden - insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+components:
+  schemas:
+    TaskRequest:
+      type: object
+      required:
+        - task
+        - attempts
+      properties:
+        task:
+          type: string
+          description: The task to execute
+          example: "Implement user authentication"
+        attempts:
+          type: integer
+          minimum: 1
+          maximum: 10
+          description: Number of parallel attempts
+          example: 3
+        config:
+          type: object
+          description: Optional configuration overrides
+          properties:
+            maxConcurrency:
+              type: integer
+              minimum: 1
+              maximum: 10
+            timeoutMs:
+              type: integer
+              minimum: 1000
+            budgetUSD:
+              type: number
+              minimum: 0
+        metadata:
+          type: object
+          description: Optional metadata for tracking
+          additionalProperties: true
+
+    TaskResponse:
+      type: object
+      properties:
+        taskId:
+          type: string
+          description: Unique task identifier
+        status:
+          type: string
+          enum: [pending, running, completed, failed, cancelled]
+        result:
+          type: object
+          description: Task result (if completed)
+          properties:
+            output:
+              type: string
+            score:
+              type: number
+              minimum: 0
+              maximum: 1
+            winnerAttempt:
+              type: integer
+        attempts:
+          type: array
+          description: Individual attempt results
+          items:
+            $ref: '#/components/schemas/Attempt'
+        costUSD:
+          type: number
+          description: Total cost in USD
+        durationMs:
+          type: integer
+          description: Total duration in milliseconds
+        createdAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+        error:
+          type: string
+          description: Error message (if failed)
+
+    Attempt:
+      type: object
+      properties:
+        attemptId:
+          type: string
+        status:
+          type: string
+          enum: [pending, running, completed, failed]
+        output:
+          type: string
+        score:
+          type: number
+          minimum: 0
+          maximum: 1
+        costUSD:
+          type: number
+        durationMs:
+          type: integer
+        sandboxId:
+          type: string
+
+    Configuration:
+      type: object
+      properties:
+        endpoints:
+          type: object
+          properties:
+            gbrain:
+              type: string
+              format: uri
+            gstack:
+              type: string
+              format: uri
+            gmirror:
+              type: string
+              format: uri
+            gtom:
+              type: string
+              format: uri
+        sandbox:
+          type: object
+          properties:
+            backend:
+              type: string
+              enum: [docker, inprocess, e2b, modal]
+            maxConcurrency:
+              type: integer
+              minimum: 1
+        sampling:
+          type: object
+          properties:
+            defaultN:
+              type: integer
+              minimum: 1
+            strategyDistribution:
+              type: object
+              properties:
+                exploit:
+                  type: number
+                  minimum: 0
+                  maximum: 1
+                perturb:
+                  type: number
+                  minimum: 0
+                  maximum: 1
+                explore:
+                  type: number
+                  minimum: 0
+                  maximum: 1
+        budget:
+          type: object
+          properties:
+            maxCostUSD:
+              type: number
+              minimum: 0
+            maxWallTimeMs:
+              type: integer
+              minimum: 1000
+            maxAttempts:
+              type: integer
+              minimum: 1
+
+    ConfigurationUpdate:
+      type: object
+      properties:
+        endpoints:
+          $ref: '#/components/schemas/Configuration/properties/endpoints'
+        sandbox:
+          $ref: '#/components/schemas/Configuration/properties/sandbox'
+        sampling:
+          $ref: '#/components/schemas/Configuration/properties/sampling'
+        budget:
+          $ref: '#/components/schemas/Configuration/properties/budget'
+
+    Error:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          description: Error message
+        code:
+          type: string
+          description: Error code for programmatic handling
+        details:
+          type: object
+          description: Additional error details
+          additionalProperties: true
+        requestId:
+          type: string
+          description: Request ID for tracing
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT token for authentication
+
+security:
+  - bearerAuth: []
