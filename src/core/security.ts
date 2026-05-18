@@ -158,6 +158,130 @@ export function sanitizeCliUrl(value: unknown, field: string): string {
   return url.toString().replace(/\/$/, '');
 }
 
+/**
+ * Sanitize Docker image name to prevent malicious image references
+ * Format: [registry/]repository[:tag]
+ * Examples: node:20-alpine, ghcr.io/user/repo:latest
+ */
+export function sanitizeDockerImage(value: unknown, field: string): string {
+  const text = sanitizeCliString(value, field, 512);
+  // Docker image name regex (simplified but effective)
+  // Allows: registry domains, repository names with slashes, tags with alphanumerics and common separators
+  const imageRegex = /^[a-z0-9]+([._-][a-z0-9]+)*(\/[a-z0-9]+([._-][a-z0-9]+)*)*(:[a-z0-9]+([._-][a-z0-9]+)*)?$/i;
+  if (!imageRegex.test(text)) {
+    throw new Error(`${field} is not a valid Docker image name`);
+  }
+  // Prevent shell metacharacters
+  if (/[\s;&|`$()<>]/.test(text)) {
+    throw new Error(`${field} contains invalid characters`);
+  }
+  return text;
+}
+
+/**
+ * Sanitize domain name for allowlist
+ * Format: domain.tld or subdomain.domain.tld
+ */
+export function sanitizeDomainName(value: unknown, field: string): string {
+  const text = sanitizeCliString(value, field, 253);
+  // Domain name regex (RFC 1035 compliant)
+  const domainRegex = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/i;
+  if (!domainRegex.test(text)) {
+    throw new Error(`${field} is not a valid domain name`);
+  }
+  return text.toLowerCase();
+}
+
+/**
+ * Sanitize container name (should be lowercase alphanumeric with hyphens)
+ */
+export function sanitizeContainerName(value: unknown, field: string): string {
+  const text = sanitizeCliString(value, field, 128);
+  // Container name regex (Docker naming rules)
+  const nameRegex = /^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$/;
+  if (!nameRegex.test(text)) {
+    throw new Error(`${field} is not a valid container name`);
+  }
+  return text;
+}
+
+/**
+ * Sanitize resource limit value (CPU cores, memory, disk, time)
+ */
+export function sanitizeResourceLimit(value: unknown, field: string, min: number, max: number): number {
+  const parsed = typeof value === 'number' ? value : Number.parseInt(String(value), 10);
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+    throw new Error(`${field} must be between ${min} and ${max}`);
+  }
+  return parsed;
+}
+
+/**
+ * Sanitize file path to prevent directory traversal attacks
+ * Resolves the path to its absolute form and ensures it stays within allowed directories
+ */
+export function sanitizeFilePath(inputPath: unknown, field: string, allowedBaseDir?: string): string {
+  const text = sanitizeCliString(inputPath, field, 4096);
+
+  // Prevent null bytes
+  if (text.includes('\0')) {
+    throw new Error(`${field} contains invalid null byte`);
+  }
+
+  // Prevent obvious path traversal attempts
+  if (text.includes('..') || text.includes('~')) {
+    throw new Error(`${field} contains path traversal sequences`);
+  }
+
+  // Resolve to absolute path
+  const resolved = path.resolve(text);
+
+  // If a base directory is specified, ensure the resolved path is within it
+  if (allowedBaseDir) {
+    const resolvedBase = path.resolve(allowedBaseDir);
+    const relative = path.relative(resolvedBase, resolved);
+
+    // If the relative path starts with '..', it's outside the base directory
+    if (relative.startsWith('..')) {
+      throw new Error(`${field} is outside allowed directory`);
+    }
+  }
+
+  return resolved;
+}
+
+/**
+ * Sanitize file path for read operations (less restrictive than write)
+ */
+export function sanitizeReadPath(inputPath: unknown, field: string, allowedBaseDir?: string): string {
+  return sanitizeFilePath(inputPath, field, allowedBaseDir);
+}
+
+/**
+ * Sanitize file path for write operations (more restrictive)
+ * Prevents overwriting sensitive files
+ */
+export function sanitizeWritePath(inputPath: unknown, field: string, allowedBaseDir: string): string {
+  const resolved = sanitizeFilePath(inputPath, field, allowedBaseDir);
+
+  // Additional safety checks for write operations
+  const filename = path.basename(resolved);
+
+  // Prevent writing to hidden files (starting with .)
+  if (filename.startsWith('.')) {
+    throw new Error(`${field} cannot write to hidden files`);
+  }
+
+  // Prevent writing to sensitive file extensions
+  const sensitiveExtensions = ['.env', '.key', '.pem', '.p12', '.pfx', '.der', '.crt', '.cer'];
+  const ext = path.extname(filename).toLowerCase();
+  if (sensitiveExtensions.includes(ext)) {
+    throw new Error(`${field} cannot write to files with extension ${ext}`);
+  }
+
+  return resolved;
+}
+
 function hashToken(token: string): string {
   return crypto.createHash('sha256').update(token).digest('hex');
 }

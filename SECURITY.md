@@ -26,8 +26,33 @@
 - Docker command execution uses array-form `spawn` arguments and `docker exec -w` so working directories are not shell-interpolated.
 - Public health endpoints are rate-limited, and shutdown requires a bearer token from `health_shutdown_token`.
 
+## Secret Rotation
+
+Rotate secrets regularly using the CLI:
+
+```bash
+# Rotate auth secret used for JWT token signing
+gorchestrator secrets rotate orchestrator_auth_secret
+
+# Rotate MCP bootstrap token
+gorchestrator secrets rotate orchestrator_mcp_token
+
+# Rotate health shutdown token
+gorchestrator secrets rotate health_shutdown_token
+
+# List all secrets
+gorchestrator secrets list
+```
+
+Secrets are stored in `GORCHESTRATOR_SECRET_DIR` (default: `~/.gorchestrator/secrets/`). Each rotation increments the version and records the timestamp. Rotate auth secrets:
+- Immediately if compromised or suspected compromise
+- On a regular schedule (e.g., quarterly) for production deployments
+- Before deploying to new environments
+
+After rotating `orchestrator_auth_secret`, restart the MCP server to use the new signing key. After rotating `orchestrator_mcp_token`, update any clients using the bootstrap token.
+
 ## Residual Risks
 
 - A sandbox command string is still intentionally executed by a shell inside the isolated container. Callers must treat the sandbox as hostile and avoid mounting sensitive host paths.
 - Legacy environment variables remain as a compatibility fallback until deployments migrate secrets into `GORCHESTRATOR_SECRET_DIR`.
-- The default local auth secret is for development only. Production deployments must rotate `gorchestrator_auth_secret` and `gorchestrator_mcp_token`.
+- The default local auth secret is for development only. Production deployments must rotate `orchestrator_auth_secret` and `orchestrator_mcp_token`.

@@ -6,7 +6,14 @@ import {
   SandboxState,
 } from '../types/index.js';
 import { coreLogger } from './observability.js';
-import { sanitizeCliPath, sanitizeCliString } from './security.js';
+import {
+  sanitizeCliPath,
+  sanitizeCliString,
+  sanitizeDockerImage,
+  sanitizeDomainName,
+  sanitizeContainerName,
+  sanitizeResourceLimit,
+} from './security.js';
 import { InProcessSandboxBackend, isDockerAvailable } from './sandbox-inprocess.js';
 
 /**
@@ -132,11 +139,16 @@ export class SandboxPoolManager {
       return;
     }
     const { config, sandbox_id } = sandbox;
-    const containerName = `gorch-${sandbox_id}`;
+    const containerName = sanitizeContainerName(`gorch-${sandbox_id}`, 'container name');
+    const safeImage = sanitizeDockerImage(config.image, 'Docker image');
+
+    // Sanitize resource limits
+    const cpuCores = sanitizeResourceLimit(config.resource_limits.cpu_cores, 'CPU cores', 1, 64);
+    const memoryMb = sanitizeResourceLimit(config.resource_limits.memory_mb, 'memory', 128, 65536);
 
     // Pull image if needed - use array-form arguments to prevent shell injection
     try {
-      await this.execSafe('docker', ['pull', config.image]);
+      await this.execSafe('docker', ['pull', safeImage]);
     } catch (error) {
       // Image might already exist
     }
@@ -147,11 +159,11 @@ export class SandboxPoolManager {
       'run',
       '-d',
       '--name', containerName,
-      '--cpus', String(config.resource_limits.cpu_cores),
-      '--memory', `${config.resource_limits.memory_mb}m`,
+      '--cpus', String(cpuCores),
+      '--memory', `${memoryMb}m`,
       '--network', config.network_isolation ? 'none' : 'bridge',
       '-v', `${containerName}-work:/workspace`,
-      config.image,
+      safeImage,
       'tail', '-f', '/dev/null', // Keep container running
     ];
 
@@ -209,6 +221,11 @@ export class SandboxPoolManager {
       return;
     }
 
+    // Sanitize all domains in the allowlist
+    const safeDomains = allowlistedDomains.map(domain =>
+      sanitizeDomainName(domain, 'allowlisted domain')
+    );
+
     try {
       // Flush existing iptables rules in OUTPUT chain
       await this.execSafe('docker', ['exec', containerName, 'iptables', '-F', 'OUTPUT']);
@@ -224,7 +241,7 @@ export class SandboxPoolManager {
       await this.execSafe('docker', ['exec', containerName, 'iptables', '-A', 'OUTPUT', '-i', 'lo', '-j', 'ACCEPT']);
 
       // Allow traffic to allowlisted domains
-      for (const domain of allowlistedDomains) {
+      for (const domain of safeDomains) {
         // Note: This is a simplified implementation. In production, you would:
         // 1. Resolve domain to IP addresses
         // 2. Add rules for each IP
@@ -332,9 +349,9 @@ export class SandboxPoolManager {
         exitCode: result.exitCode,
       };
     }
-    const containerName = `gorch-${sandbox.sandbox_id}`;
+    const containerName = sanitizeContainerName(`gorch-${sandbox.sandbox_id}`, 'container name');
     const dockerArgs = this.buildDockerExecArgs(containerName, command, cwd);
-    
+        
     try {
       const { stdout, stderr } = await this.execSafe('docker', dockerArgs);
       return { stdout, stderr, exitCode: 0 };
@@ -408,9 +425,9 @@ export class SandboxPoolManager {
       return result.exitCode;
     }
 
-    const containerName = `gorch-${sandbox.sandbox_id}`;
+    const containerName = sanitizeContainerName(`gorch-${sandbox.sandbox_id}`, 'container name');
     const dockerArgs = this.buildDockerExecArgs(containerName, command, cwd);
-    
+
     return new Promise((resolve, reject) => {
       const process = spawn('docker', dockerArgs);
 
@@ -496,24 +513,28 @@ export class SandboxPoolManager {
    */
   private async restoreDockerSnapshot(sandbox: Sandbox, snapshotName: string): Promise<void> {
     if (this.mockMode) { return; }
-    const containerName = `gorch-${sandbox.sandbox_id}`;
-    
+    const containerName = sanitizeContainerName(`gorch-${sandbox.sandbox_id}`, 'container name');
+
+    // Sanitize resource limits
+    const cpuCores = sanitizeResourceLimit(sandbox.config.resource_limits.cpu_cores, 'CPU cores', 1, 64);
+    const memoryMb = sanitizeResourceLimit(sandbox.config.resource_limits.memory_mb, 'memory', 128, 65536);
+
     // Stop and remove current container - use array-form arguments
     await this.execSafe('docker', ['stop', containerName]).catch(() => {});
     await this.execSafe('docker', ['rm', containerName]).catch(() => {});
-    
+
     // Create new container from snapshot - use array-form arguments
     const dockerArgs = [
       'run',
       '-d',
       '--name', containerName,
-      '--cpus', String(sandbox.config.resource_limits.cpu_cores),
-      '--memory', `${sandbox.config.resource_limits.memory_mb}m`,
+      '--cpus', String(cpuCores),
+      '--memory', `${memoryMb}m`,
       '--network', sandbox.config.network_isolation ? 'none' : 'bridge',
       snapshotName,
       'tail', '-f', '/dev/null',
     ];
-    
+
     await this.execSafe(dockerArgs[0], dockerArgs.slice(1));
   }
 
@@ -564,7 +585,7 @@ export class SandboxPoolManager {
       await this.inProcessBackend.destroy();
       return;
     }
-    const containerName = `gorch-${sandbox.sandbox_id}`;
+    const containerName = sanitizeContainerName(`gorch-${sandbox.sandbox_id}`, 'container name');
 
     await this.execSafe('docker', ['stop', containerName]).catch(() => {});
     await this.execSafe('docker', ['rm', containerName]).catch(() => {});

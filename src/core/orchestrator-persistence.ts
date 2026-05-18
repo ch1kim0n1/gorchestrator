@@ -274,16 +274,16 @@ export class OrchestratorPersistenceManager {
 
   private loadMigrations(): Array<{ version: number; name: string; sql: string }> {
     const migrationDirCandidates = [
-      path.join(__dirname, 'migrations'),
-      path.join(process.cwd(), 'src', 'core', 'migrations'),
+      path.join(__dirname, '../migrations'),
+      path.join(process.cwd(), 'migrations'),
+      path.join(process.cwd(), '.gorchestrator', 'migrations'),
     ];
-    const migrationDir = migrationDirCandidates.find(candidate => fs.existsSync(candidate));
+    const migrationDir = migrationDirCandidates.find(dir => fs.existsSync(dir));
     if (!migrationDir) {
-      return this.embeddedMigrations();
+      return [];
     }
-
     return fs.readdirSync(migrationDir)
-      .filter(file => /^\d+_.+\.sql$/.test(file))
+      .filter(file => file.endsWith('.sql'))
       .sort()
       .map(file => ({
         version: Number(file.split('_')[0]),
@@ -307,65 +307,7 @@ export class OrchestratorPersistenceManager {
       .map(name => path.join(this.backupDir, name))
       .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
     for (const stale of backups.slice(this.backupRetentionCount)) {
-      fs.rmSync(stale, { force: true });
+      fs.unlinkSync(stale);
     }
-  }
-
-  private embeddedMigrations(): Array<{ version: number; name: string; sql: string }> {
-    return [
-      {
-        version: 1,
-        name: 'orchestrator_persistence',
-        sql: `
-          CREATE TABLE IF NOT EXISTS attempt_results (
-            attempt_id TEXT PRIMARY KEY,
-            task_id TEXT NOT NULL,
-            agent_config_id TEXT NOT NULL,
-            status TEXT NOT NULL,
-            output TEXT,
-            error TEXT,
-            duration_ms INTEGER NOT NULL,
-            cost_usd REAL NOT NULL,
-            timestamp TEXT NOT NULL
-          );
-          CREATE TABLE IF NOT EXISTS scored_attempts (
-            attempt_id TEXT PRIMARY KEY,
-            task_id TEXT NOT NULL,
-            overall_score REAL NOT NULL,
-            correctness_score REAL,
-            efficiency_score REAL,
-            completeness_score REAL,
-            hard_gates_passed INTEGER NOT NULL,
-            timestamp TEXT NOT NULL,
-            FOREIGN KEY (attempt_id) REFERENCES attempt_results(attempt_id)
-          );
-          CREATE TABLE IF NOT EXISTS task_runs (
-            task_id TEXT PRIMARY KEY,
-            description TEXT NOT NULL,
-            total_attempts INTEGER NOT NULL,
-            successful_attempts INTEGER NOT NULL,
-            total_cost_usd REAL NOT NULL,
-            total_duration_ms REAL NOT NULL,
-            winner_attempt_id TEXT,
-            timestamp TEXT NOT NULL
-          );
-          CREATE INDEX IF NOT EXISTS idx_attempt_results_task ON attempt_results(task_id, timestamp);
-          CREATE INDEX IF NOT EXISTS idx_attempt_results_timestamp ON attempt_results(timestamp);
-          CREATE INDEX IF NOT EXISTS idx_scored_attempts_task ON scored_attempts(task_id, timestamp);
-          CREATE INDEX IF NOT EXISTS idx_task_runs_timestamp ON task_runs(timestamp);
-        `,
-      },
-      {
-        version: 2,
-        name: 'persistence_operations',
-        sql: `
-          CREATE TABLE IF NOT EXISTS persistence_metadata (
-            key TEXT PRIMARY KEY,
-            value_json TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-          );
-        `,
-      },
-    ];
   }
 }

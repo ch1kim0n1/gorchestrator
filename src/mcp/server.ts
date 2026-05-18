@@ -404,11 +404,32 @@ class GOrchestratorMCPServer {
   }
 
   private static readonly RunArgsSchema = z.object({
-    task: z.string().min(1),
-    n: z.number().int().positive().optional(),
+    task: z.string().min(1).max(10000),
+    n: z.number().int().positive().max(100).optional(),
     taskType: z.string().optional(),
     verify: z.boolean().optional(),
     cognitiveCheck: z.boolean().optional(),
+  });
+
+  private static readonly ConfigSampleArgsSchema = z.object({
+    task: z.string().min(1).max(10000),
+    taskType: z.string().optional(),
+    n: z.number().int().positive().max(100).optional(),
+  });
+
+  private static readonly GetReceiptsArgsSchema = z.object({
+    limit: z.number().int().positive().max(1000).optional(),
+    offset: z.number().int().nonnegative().max(10000).optional(),
+    startDate: z.string().datetime().optional(),
+    endDate: z.string().datetime().optional(),
+  });
+
+  private static readonly GetDriftArgsSchema = z.object({
+    metricName: z.string().optional(),
+  });
+
+  private static readonly AttemptsArgsSchema = z.object({
+    limit: z.number().int().positive().max(1000).optional(),
   });
 
   private async handleRun(args: {
@@ -471,6 +492,10 @@ class GOrchestratorMCPServer {
     taskType?: string;
     n?: number;
   }) {
+    const parsed = GOrchestratorMCPServer.ConfigSampleArgsSchema.safeParse(args);
+    if (!parsed.success) {
+      return this.errorResponse(`Invalid request: ${JSON.stringify(parsed.error.flatten())}`);
+    }
     // For MVP, return a simple response
     // In production, would call ConfigurationSampler directly
     return {
@@ -478,9 +503,9 @@ class GOrchestratorMCPServer {
         {
           type: 'text',
           text: JSON.stringify({
-            task: args.task,
-            taskType: args.taskType,
-            n: args.n || 5,
+            task: parsed.data.task,
+            taskType: parsed.data.taskType,
+            n: parsed.data.n || 5,
             configs: [
               {
                 config_id: 'sample-1',
@@ -507,7 +532,11 @@ class GOrchestratorMCPServer {
     startDate?: string;
     endDate?: string;
   } = {}) {
-    const receipts = await this.orchestrator.getReceipts(args);
+    const parsed = GOrchestratorMCPServer.GetReceiptsArgsSchema.safeParse(args);
+    if (!parsed.success) {
+      return this.errorResponse(`Invalid request: ${JSON.stringify(parsed.error.flatten())}`);
+    }
+    const receipts = await this.orchestrator.getReceipts(parsed.data);
     return {
       content: [
         {
@@ -521,7 +550,11 @@ class GOrchestratorMCPServer {
   private async handleGetDrift(args: {
     metricName?: string;
   } = {}) {
-    const drift = await this.orchestrator.getDrift(args.metricName);
+    const parsed = GOrchestratorMCPServer.GetDriftArgsSchema.safeParse(args);
+    if (!parsed.success) {
+      return this.errorResponse(`Invalid request: ${JSON.stringify(parsed.error.flatten())}`);
+    }
+    const drift = await this.orchestrator.getDrift(parsed.data.metricName);
     return {
       content: [
         {
@@ -559,7 +592,11 @@ class GOrchestratorMCPServer {
   private async handleAttempts(args: {
     limit?: number;
   } = {}) {
-    const attempts = this.orchestrator.getAttempts(args.limit);
+    const parsed = GOrchestratorMCPServer.AttemptsArgsSchema.safeParse(args);
+    if (!parsed.success) {
+      return this.errorResponse(`Invalid request: ${JSON.stringify(parsed.error.flatten())}`);
+    }
+    const attempts = this.orchestrator.getAttempts(parsed.data.limit);
     return {
       content: [
         {
