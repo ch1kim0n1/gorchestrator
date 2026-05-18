@@ -391,7 +391,7 @@ program
         process.exit(0);
       }
 
-      const { ReplayManager } = await import('../../shared/src/core/replay-manager.js');
+      const { ReplayManager } = await import('./core/shared-utils.js');
       const replayManager = new ReplayManager(options.corpus);
       
       const result = await replayManager.retrieve(id);

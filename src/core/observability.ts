@@ -19,11 +19,11 @@ interface SpanRecord {
 }
 
 interface HealthCheckLike {
-  service: string;
+  service?: string;
   healthy: boolean;
-  latency_ms: number;
+  latency_ms?: number;
   error?: string;
-  timestamp: string;
+  timestamp?: string;
 }
 
 const SENSITIVE_KEYS = /(?:api[_-]?key|token|secret|password|authorization|email|phone|ssn|credit[_-]?card)/i;

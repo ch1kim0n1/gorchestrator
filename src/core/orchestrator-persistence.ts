@@ -274,7 +274,11 @@ export class OrchestratorPersistenceManager {
 
   private loadMigrations(): Array<{ version: number; name: string; sql: string }> {
     const migrationDirCandidates = [
+      path.join(__dirname, 'migrations'),
       path.join(__dirname, '../migrations'),
+      path.join(__dirname, '../../src/core/migrations'),
+      path.join(__dirname, '../../../src/core/migrations'),
+      path.join(process.cwd(), 'src/core/migrations'),
       path.join(process.cwd(), 'migrations'),
       path.join(process.cwd(), '.gorchestrator', 'migrations'),
     ];

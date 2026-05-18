@@ -1032,8 +1032,8 @@ export class GOrchestrator {
       this.latencyTracker.record(latencyMs);
       this.observability.metrics.recordPublicMethod('healthCheck', latencyMs, 'ok');
       for (const result of results) {
-        this.observability.metrics.observe('gorchestrator_health_check_latency_ms', result.latency_ms, { service: result.service });
-        if (!result.healthy) this.observability.metrics.increment('gorchestrator_health_check_errors_total', { service: result.service });
+        this.observability.metrics.observe('gorchestrator_health_check_latency_ms', result.latency_ms ?? 0, { service: result.service ?? 'unknown' });
+        if (!result.healthy) this.observability.metrics.increment('gorchestrator_health_check_errors_total', { service: result.service ?? 'unknown' });
       }
       await this.observability.alertOnHealthDrop(healthScore, results);
       const components = Object.fromEntries(
@@ -1192,10 +1192,11 @@ export class GOrchestrator {
     let earned = 0;
     let total = 0;
     for (const result of results) {
-      const weight = weights[result.service] ?? 2;
+      const weight = weights[result.service ?? ''] ?? 2;
       total += weight;
       if (result.healthy) {
-        const latencyPenalty = result.latency_ms > 2000 ? 0.75 : result.latency_ms > 500 ? 0.9 : 1;
+        const lat = result.latency_ms ?? 0;
+        const latencyPenalty = lat > 2000 ? 0.75 : lat > 500 ? 0.9 : 1;
         earned += weight * latencyPenalty;
       }
     }

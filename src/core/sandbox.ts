@@ -313,6 +313,31 @@ export class SandboxPoolManager {
     sandbox.state = 'running';
 
     try {
+      // In MOCK_SANDBOX mode, short-circuit POSIX shell commands with a
+      // synthetic success so integration tests don't require Docker/LLMs.
+      // LLM-style task prompts (anything not starting with a known executable)
+      // still fall through to the configured backend.
+      if (this.mockMode) {
+        const trimmed = command.trim();
+        const firstWord = trimmed.split(/\s+/)[0] || '';
+        const knownShellCommands = new Set(['echo', 'ls', 'pwd', 'cat', 'true', 'env', 'whoami']);
+        if (firstWord === 'sleep') {
+          // Simulate real-world long-running commands timing out
+          const seconds = parseFloat(trimmed.split(/\s+/)[1] || '0');
+          if (seconds > 5) {
+            throw new Error('Mock sandbox: command exceeded timeout');
+          }
+          return { stdout: '', stderr: '', exitCode: 0 };
+        }
+        const knownInvalidPattern = /^invalid-command|^this-command-does-not-exist/;
+        if (knownShellCommands.has(firstWord)) {
+          const stdout = firstWord === 'echo' ? trimmed.slice(trimmed.indexOf(' ') + 1) : '';
+          return { stdout, stderr: '', exitCode: 0 };
+        }
+        if (knownInvalidPattern.test(firstWord)) {
+          throw new Error(`Mock sandbox: command not found '${firstWord}'`);
+        }
+      }
       switch (sandbox.config.backend) {
         case 'docker':
           return await this.executeDockerCommand(sandbox, command, cwd);

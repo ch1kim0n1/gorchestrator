@@ -58,13 +58,17 @@ export interface ConsensusResult {
 }
 
 export interface OutputComparison {
-  similar: boolean;
-  similarity: number;
-  differences: string[];
+  similar?: boolean;
+  similarity?: number;
+  differences?: string[];
   tier1Output?: any;
+  tier2Output?: any;
+  tier1Confidence?: number;
+  tier2Confidence?: number;
 }
 
-export function determineConsensus(outputs: any[], threshold: number = 0.8): ConsensusResult {
+export function determineConsensus(input: any, threshold: number = 0.8): ConsensusResult {
+  const outputs = Array.isArray(input) ? input : [input];
   if (outputs.length === 0) {
     return { consensus: false, agreement: 0, votes: [] };
   }
@@ -73,19 +77,23 @@ export function determineConsensus(outputs: any[], threshold: number = 0.8): Con
     consensus: agreement >= threshold,
     agreement,
     votes: outputs,
+    decision: 'tier1',
+    reason: 'stub',
   };
 }
 
 export class DriftDetector {
+  constructor(_config?: any) {}
   recordSnapshot(_name: string, _value: number, _context?: any): void {}
   recordRelationalMetric(_metric_name: string, _value: number, _dyad_id: string, _relational_type: string, _context?: any): void {}
-  detectDrift(_metric: string, _threshold: number): boolean { return false; }
+  detectDrift(_metric: string, _threshold?: number): boolean { return false; }
   detectAllDrift(_threshold?: number): boolean[] { return []; }
 }
 
 export class LatencyTracker {
   private latencies = new Map<string, number[]>();
-  
+
+  constructor(_capacity?: number) {}
   start(_operation: string): void {}
   end(operation: string): number {
     const latency = Math.random() * 100;
@@ -142,26 +150,56 @@ export interface AuthToken {
   expiresAt: string;
 }
 
-export function createAuthMiddleware() {
+export function createAuthMiddleware(_config?: any) {
+  const mkToken = (_customRoles?: string[]) => ({
+    token: 'mock',
+    expiresAt: new Date(Date.now() + 3600000).toISOString(),
+    roles: _customRoles || ['read', 'write'],
+  });
   return {
-    authenticate: () => Promise.resolve({ success: true, error: null, token: null }),
-    getAuth: () => ({ authenticated: true, hashToken: () => 'mock' }),
+    authenticate: (_token?: string) => ({
+      success: true,
+      error: null as string | null,
+      token: { roles: ['read', 'write'] as string[] } as { roles: string[] } | null,
+    }),
+    getAuth: () => ({
+      authenticated: true,
+      hashToken: (_t?: string) => 'mock',
+      generateToken: mkToken,
+    }),
     middleware: (req: any, res: any, next: any) => next(),
-    generateToken: () => ({ token: 'mock', expiresAt: new Date().toISOString() }),
+    generateToken: mkToken,
   };
 }
 
 export class ReplayManager {
+  constructor(_corpus?: string) {}
   record(_receipt: any): void {}
   replay(_receiptId: string): any { return null; }
-  retrieve(_receiptId: string): any { return null; }
+  retrieve(_receiptId: string): any {
+    return { found: false, content: '', metadata: { tool: '', timestamp: '', task: '' } };
+  }
 }
 
 export class CostLedger {
   recordCost(_cost: number, _context?: any): void {}
   getTotalCost(): number { return 0; }
-  getStatistics(): { totalCost: number; averageCost: number; count: number } {
-    return { totalCost: 0, averageCost: 0, count: 0 };
+  getStatistics(): {
+    totalCost: number;
+    averageCost: number;
+    count: number;
+    total_committed_usd: number;
+    avg_committed_usd: number;
+    byTier: Record<string, { count: number; total_usd: number }>;
+  } {
+    return {
+      totalCost: 0,
+      averageCost: 0,
+      count: 0,
+      total_committed_usd: 0,
+      avg_committed_usd: 0,
+      byTier: {},
+    };
   }
 }
 
