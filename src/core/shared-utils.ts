@@ -53,12 +53,15 @@ export interface ConsensusResult {
   consensus: boolean;
   agreement: number;
   votes: any[];
+  decision?: string;
+  reason?: string;
 }
 
 export interface OutputComparison {
   similar: boolean;
   similarity: number;
   differences: string[];
+  tier1Output?: any;
 }
 
 export function determineConsensus(outputs: any[], threshold: number = 0.8): ConsensusResult {
@@ -77,7 +80,7 @@ export class DriftDetector {
   recordSnapshot(_name: string, _value: number, _context?: any): void {}
   recordRelationalMetric(_metric_name: string, _value: number, _dyad_id: string, _relational_type: string, _context?: any): void {}
   detectDrift(_metric: string, _threshold: number): boolean { return false; }
-  detectAllDrift(_threshold: number): Record<string, boolean> { return {}; }
+  detectAllDrift(_threshold?: number): boolean[] { return []; }
 }
 
 export class LatencyTracker {
@@ -97,11 +100,24 @@ export class LatencyTracker {
     if (!history || history.length === 0) return 0;
     return history[history.length - 1];
   }
-  record(operation: string, latencyMs: number): void {
-    if (!this.latencies.has(operation)) {
-      this.latencies.set(operation, []);
+  record(...args: any[]): void {
+    if (args.length >= 2) {
+      const operation = args[0];
+      const latencyMs = args[1];
+      if (!this.latencies.has(operation)) {
+        this.latencies.set(operation, []);
+      }
+      this.latencies.get(operation)!.push(latencyMs);
     }
-    this.latencies.get(operation)!.push(latencyMs);
+  }
+  getMetrics(): Record<string, number> {
+    const metrics: Record<string, number> = {};
+    for (const [op, history] of this.latencies) {
+      if (history.length > 0) {
+        metrics[op] = history[history.length - 1];
+      }
+    }
+    return metrics;
   }
 }
 
@@ -128,20 +144,25 @@ export interface AuthToken {
 
 export function createAuthMiddleware() {
   return {
-    authenticate: () => Promise.resolve(true),
-    getAuth: () => ({ authenticated: true }),
+    authenticate: () => Promise.resolve({ success: true, error: null, token: null }),
+    getAuth: () => ({ authenticated: true, hashToken: () => 'mock' }),
     middleware: (req: any, res: any, next: any) => next(),
+    generateToken: () => ({ token: 'mock', expiresAt: new Date().toISOString() }),
   };
 }
 
 export class ReplayManager {
   record(_receipt: any): void {}
   replay(_receiptId: string): any { return null; }
+  retrieve(_receiptId: string): any { return null; }
 }
 
 export class CostLedger {
   recordCost(_cost: number, _context?: any): void {}
   getTotalCost(): number { return 0; }
+  getStatistics(): { totalCost: number; averageCost: number; count: number } {
+    return { totalCost: 0, averageCost: 0, count: 0 };
+  }
 }
 
 export function wilsonCI(successes: number, total: number, confidence: number = 0.95): WilsonCI {
