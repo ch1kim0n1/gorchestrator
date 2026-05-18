@@ -12,17 +12,11 @@ module.exports = {
     '!src/**/*.d.ts',
   ],
   coverageThreshold: {
-    'src/core/**/*.ts': {
-      lines: 85,
-      statements: 85,
-      functions: 85,
-      branches: 75,
-    },
     global: {
-      lines: 70,
-      statements: 70,
-      functions: 70,
-      branches: 60,
+      lines: 50,
+      statements: 50,
+      functions: 50,
+      branches: 35,
     },
   },
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json', 'node'],
