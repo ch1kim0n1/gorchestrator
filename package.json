@@ -2,20 +2,20 @@
   "name": "gorchestrator",
   "version": "0.5.0",
   "description": "Parallel agent execution manager for the G-Stack",
-  "main": "./dist/gorchestrator/src/sdk.js",
-  "types": "./dist/gorchestrator/src/sdk.d.ts",
+  "main": "./dist/sdk.js",
+  "types": "./dist/sdk.d.ts",
   "bin": {
     "gorchestrator": "./dist/cli.js"
   },
   "exports": {
     ".": {
-      "types": "./dist/gorchestrator/src/sdk.d.ts",
-      "import": "./dist/gorchestrator/src/sdk.js",
-      "require": "./dist/gorchestrator/src/sdk.js"
+      "types": "./dist/sdk.d.ts",
+      "import": "./dist/sdk.js",
+      "require": "./dist/sdk.js"
     },
     "./sdk": {
-      "require": "./dist/gorchestrator/src/sdk.js",
-      "types": "./dist/gorchestrator/src/sdk.d.ts"
+      "types": "./dist/sdk.d.ts",
+      "require": "./dist/sdk.js"
     },
     "./cli": {
       "types": "./dist/cli.d.ts",
@@ -23,8 +23,8 @@
       "require": "./dist/cli.js"
     },
     "./client": {
-      "types": "./dist/gorchestrator/src/client.d.ts",
-      "require": "./dist/gorchestrator/src/client.js"
+      "types": "./dist/client.d.ts",
+      "require": "./dist/client.js"
     },
     "./package.json": "./package.json"
   },
@@ -38,6 +38,8 @@
   },
   "scripts": {
     "build": "tsc",
+    "prepublishOnly": "npm run build",
+    "prepare": "npm run build",
     "dev": "tsc --watch",
     "serve": "node dist/serve.js",
     "test": "jest",
@@ -58,7 +60,7 @@
     "eval:summary": "node scripts/eval-tools.js summary",
     "eval:compare": "node scripts/eval-tools.js compare",
     "eval:select": "node scripts/eval-tools.js select",
-    "benchmark": "npm run build && node dist/gorchestrator/src/cli.js benchmark --n 10 --max-concurrency 2 --json",
+    "benchmark": "npm run build && node dist/cli.js benchmark --n 10 --max-concurrency 2 --json",
     "load:k6": "k6 run load/k6.js",
     "load:artillery": "artillery run load/artillery.yml",
     "test:mutation": "npx stryker run",
@@ -72,7 +74,6 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.96.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "@types/pg": "^8.20.0",
     "better-sqlite3": "^12.10.0",
     "chalk": "^4.1.2",
     "commander": "^12.0.0",
@@ -89,6 +90,7 @@
     "@types/better-sqlite3": "^7.6.13",
     "@types/jest": "^29.5.14",
     "@types/node": "^20.0.0",
+    "@types/pg": "^8.20.0",
     "@types/uuid": "^9.0.0",
     "@typescript-eslint/eslint-plugin": "^6.0.0",
     "@typescript-eslint/parser": "^6.0.0",

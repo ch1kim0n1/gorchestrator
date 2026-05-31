@@ -19,6 +19,7 @@ import {
   EscalationMetrics,
   TierConfig,
   DeveloperTaskRequest,
+  DeveloperTaskInputSchema,
   DyadPipelineResult,
   RelationshipAnalysisTask,
   RelationshipAnalysisTaskSchema,
@@ -274,20 +275,22 @@ export class GOrchestrator {
       throw new BudgetExceededError(`Budget exhausted before LLM call. Spent: $${budgetStatus.total_committed.toFixed(4)}, Max: $${budgetStatus.max_budget_usd.toFixed(4)}`);
     }
     const reserveUsd = Math.max(costUsd, Number(process.env.GORCH_LLM_CALL_RESERVE_USD ?? 0.01));
-    const reservation = this.costLedger.reserve('gorchestrator_llm_call', reserveUsd, Number(process.env.GORCH_LLM_RESERVATION_TTL_MS ?? 5 * 60 * 1000), {
-      scope: 'execution',
-      resolver: 'llm',
-    });
-    await this.costLedger.commit(reservation.id, costUsd, {
-      model_id: modelId,
-      input_tokens: inputTokens,
-      output_tokens: outputTokens,
-      operation: 'gorchestrator_llm_call',
-      metadata: {
-        scope: 'execution',
-        resolver: 'llm',
+    // Atomic reserve+commit under the ledger lock so parallel attempts cannot
+    // collectively overrun the budget/scope caps (issue #53).
+    await this.costLedger.reserveAndCommit(
+      'gorchestrator_llm_call',
+      reserveUsd,
+      costUsd,
+      Number(process.env.GORCH_LLM_RESERVATION_TTL_MS ?? 5 * 60 * 1000),
+      { scope: 'execution', resolver: 'llm' },
+      {
+        model_id: modelId,
+        input_tokens: inputTokens,
+        output_tokens: outputTokens,
+        operation: 'gorchestrator_llm_call',
+        metadata: { scope: 'execution', resolver: 'llm' },
       },
-    });
+    );
   }
 
   /**
@@ -305,7 +308,17 @@ export class GOrchestrator {
       throw new Error('Invalid task: description cannot be empty');
     }
     if (desc.length > 10000) {
-      throw new Error(Invalid task: description too long ( > 10000 chars));
+      throw new Error('Invalid task: description too long ( > 10000 chars)');
+    }
+
+    // Schema-validate developer-task inputs (issue #63). Relationship tasks are
+    // validated separately via RelationshipAnalysisTaskSchema. We only validate
+    // serializable fields here (signal/onProgress are runtime-only).
+    if (!this.isRelationshipAnalysisTask(rawTask)) {
+      const devValidation = DeveloperTaskInputSchema.safeParse(rawTask);
+      if (!devValidation.success) {
+        throw new Error(`Invalid developer task: ${JSON.stringify(devValidation.error.flatten().fieldErrors)}`);
+      }
     }
 
     const start = performance.now();
@@ -574,7 +587,7 @@ export class GOrchestrator {
     const detectorPool = new DetectorPool(this.llmClient, {
       tier1_model: 'claude-haiku-4-5',
       tier2_model: 'claude-sonnet-4-6',
-      consensus_threshold: 0.7,
+      escalation_confidence_threshold: 0.7,
     });
     return new DyadPipeline({
       detectorPool,
@@ -693,7 +706,7 @@ export class GOrchestrator {
     priority: 'normal' | 'high' | 'critical' = 'normal'
   ): Promise<ScoredAttempt[]> {
     // First, score with Tier 1
-    const tier1ScoredAttempts = await this.scoreAttempts(taskBundle, attempts);
+    const tier1ScoredAttempts = await this.scoreAttempts(taskBundle, attempts, 'tier1');
 
     // Check if escalation is needed based on hard gate failures
     const hardGateFailures = tier1ScoredAttempts.filter(a => !a.scores.hard_gates_passed);
@@ -705,8 +718,8 @@ export class GOrchestrator {
       const tier2Config = this.tierConfigs.get('tier2')!;
       this.logger.info(`Using Tier 2: ${tier2Config.name} for re-scoring`);
 
-      // Score with Tier 2
-      const tier2ScoredAttempts = await this.scoreAttempts(taskBundle, attempts);
+      // Score with Tier 2 (distinct higher-capability model/profile, not a duplicate call)
+      const tier2ScoredAttempts = await this.scoreAttempts(taskBundle, attempts, 'tier2');
       
       // Apply consensus mechanism to determine which outputs to accept
       const consensusResults = await this.applyConsensus(
@@ -738,8 +751,8 @@ export class GOrchestrator {
     this.escalationMetrics.tier3_count++;
     const tier3StartTime = Date.now();
     
-    // Score with Tier 3
-    const tier3ScoredAttempts = await this.scoreAttempts(taskBundle, attempts);
+    // Score with Tier 3 (distinct critical-path model/profile)
+    const tier3ScoredAttempts = await this.scoreAttempts(taskBundle, attempts, 'tier3');
     
     const tier3Latency = Date.now() - tier3StartTime;
     this.escalationMetrics.tier3_avg_latency_ms = this.escalationMetrics.tier3_avg_latency_ms === 0
@@ -855,31 +868,31 @@ export class GOrchestrator {
    */
   private async scoreAttempts(
     taskBundle: TaskBundle,
-    attempts: AttemptResult[]
+    attempts: AttemptResult[],
+    tier: 'tier1' | 'tier2' | 'tier3' = 'tier1'
   ): Promise<ScoredAttempt[]> {
     if (!this.gmirrorEndpoint) {
+      // FAIL CLOSED: with no scorer configured we cannot verify hard gates, so
+      // we must NOT auto-pass them (issue #51). Treat as gate failure.
+      this.logger.warn('GMirror not configured; failing hard gates closed (no auto-pass)');
       return attempts.map(attempt => ({
         ...attempt,
-        verdict: 'pass',
-        score: 0.8,
-        hard_gates_passed: true,
-        scores: {
-          correctness: { score: 0.8, confidence: 0.8, evidence: ['GMirror not configured'] },
-          user_outcome: { score: 0.8, confidence: 0.8, evidence: ['GMirror not configured'] },
-          robustness: { score: 0.8, confidence: 0.8, evidence: ['GMirror not configured'] },
-          risk: { score: 0.8, confidence: 0.8, evidence: ['GMirror not configured'] },
-          overall_score: 0.8,
-          hard_gates_passed: true,
-        },
+        verdict: 'fail',
+        score: 0,
+        hard_gates_passed: false,
+        scores: this.scoringUnavailableScore('GMirror not configured'),
         selected: false,
       }));
     }
 
+    const tierModel = this.tierConfigs.get(tier)?.model_id;
     const scoringRequest: GMirrorScoringRequest = {
       task: taskBundle,
       attempts,
       scoring_profile: taskBundle.signature.task_type,
       budget_ms: taskBundle.budget.max_wall_time_ms * 0.3,
+      scoring_tier: tier,
+      scoring_model: tierModel,
     };
 
     try {
@@ -917,13 +930,22 @@ export class GOrchestrator {
    * Fallback scoring when GMirror is unavailable
    */
   private fallbackScore() {
+    // FAIL CLOSED: a GMirror failure must not auto-pass hard gates (issue #51).
+    return this.scoringUnavailableScore('GMirror unavailable');
+  }
+
+  /**
+   * Score bundle used when scoring cannot be performed. Hard gates fail closed
+   * so unverified/low-quality outputs are never marked as passing.
+   */
+  private scoringUnavailableScore(reason: string) {
     return {
-      correctness: { score: 0.5, confidence: 0.3, evidence: ['GMirror unavailable'] },
-      user_outcome: { score: 0.5, confidence: 0.3, evidence: ['GMirror unavailable'] },
-      robustness: { score: 0.5, confidence: 0.3, evidence: ['GMirror unavailable'] },
-      risk: { score: 0.5, confidence: 0.3, evidence: ['GMirror unavailable'] },
-      overall_score: 0.5,
-      hard_gates_passed: true,
+      correctness: { score: 0, confidence: 0, evidence: [reason] },
+      user_outcome: { score: 0, confidence: 0, evidence: [reason] },
+      robustness: { score: 0, confidence: 0, evidence: [reason] },
+      risk: { score: 0, confidence: 0, evidence: [reason] },
+      overall_score: 0,
+      hard_gates_passed: false,
     };
   }
 
@@ -1003,7 +1025,7 @@ export class GOrchestrator {
     const timeoutPromise = new Promise<never>((_, reject) =>
 
 
-      setTimeout(() => reject(new Error(''GBrain write timeout'')), GBRAIN_WRITE_TIMEOUT_MS)
+      setTimeout(() => reject(new Error('GBrain write timeout')), GBRAIN_WRITE_TIMEOUT_MS)
 
 
     );
@@ -1530,6 +1552,30 @@ export class GOrchestrator {
     } catch {
       // Drift history persistence is best-effort; task execution should not fail because telemetry cannot be saved.
     }
+  }
+
+  /**
+   * Serialize success-rate history writes so concurrent task completions cannot
+   * interleave and corrupt the on-disk JSON. Each call chains onto the previous
+   * write via successRateHistoryWriteLock. Persistence is best-effort.
+   */
+  private queueSuccessRateHistoryWrite(): void {
+    const snapshot = this.successRateHistory.slice(-50);
+    this.successRateHistoryWriteLock = this.successRateHistoryWriteLock
+      .then(async () => {
+        try {
+          await fs.promises.mkdir(path.dirname(this.successRateHistoryPath), { recursive: true });
+          await fs.promises.writeFile(
+            this.successRateHistoryPath,
+            JSON.stringify(snapshot, null, 2)
+          );
+        } catch {
+          // Drift history persistence is best-effort; task execution should not fail because telemetry cannot be saved.
+        }
+      })
+      .catch(() => {
+        // Never let a rejected write break the lock chain for subsequent writes.
+      });
   }
 
   /**
