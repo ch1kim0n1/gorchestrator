@@ -51,6 +51,8 @@ export const ANTHROPIC_PRICING: Record<string, ModelPricing> = {
   'claude-opus-4-7': { input: 5.00, output: 25.00, avg_latency_ms: 5000 },
   'claude-sonnet-4-6': { input: 3.00, output: 15.00, avg_latency_ms: 2000 },
   'claude-haiku-4-5-20251001': { input: 1.00, output: 5.00, avg_latency_ms: 500 },
+  // Alias used as a default-tier id across the orchestrator/detector-pool.
+  'claude-haiku-4-5': { input: 1.00, output: 5.00, avg_latency_ms: 500 },
   'claude-opus-4-6': { input: 5.00, output: 25.00, avg_latency_ms: 5000 },
   'claude-3-5-sonnet-20241022': { input: 3.00, output: 15.00, avg_latency_ms: 2000 },
   'claude-3-5-haiku-20241022': { input: 0.80, output: 4.00, avg_latency_ms: 500 },
@@ -93,19 +95,35 @@ export type ModelResolutionSource = typeof MODEL_RESOLUTION_CHAIN[number]['sourc
 /**
  * Estimate cost for a model call
  */
+/**
+ * Conservative fallback pricing applied when a model id is not found in the
+ * pricing table. Using a non-zero, deliberately expensive rate keeps budget
+ * gates meaningful (they will trip) rather than silently allowing unbounded
+ * spend at $0. This matches the most expensive tier in the table.
+ */
+export const FALLBACK_PRICING: ModelPricing = { input: 5.00, output: 25.00, avg_latency_ms: 5000 };
+
+/** Strip vendor prefixes (e.g. "anthropic/", "openai/") to canonicalize a model id. */
+export function canonicalizeModelId(modelId: string): string {
+  return modelId.replace(/^(anthropic|openai)\//, '');
+}
+
 export function estimateCostUsd(
   modelId: string,
   inputTokens: number,
   outputTokens: number,
 ): number {
-  const pricing = MODEL_PRICING[modelId];
+  const pricing = MODEL_PRICING[modelId] || MODEL_PRICING[canonicalizeModelId(modelId)];
+  const resolved = pricing ?? FALLBACK_PRICING;
   if (!pricing) {
-    coreLogger.warn('No pricing for model', { model_id: modelId });
-    return 0;
+    // Unknown model must NOT silently produce $0 cost (would defeat budget gates).
+    coreLogger.warn('No pricing for model; applying conservative fallback rate', {
+      model_id: modelId,
+    });
   }
   return (
-    (inputTokens / 1_000_000) * pricing.input +
-    (outputTokens / 1_000_000) * pricing.output
+    (inputTokens / 1_000_000) * resolved.input +
+    (outputTokens / 1_000_000) * resolved.output
   );
 }
 
@@ -163,18 +181,56 @@ export class LLMClient {
     };
     this.metricsPersistencePath = this.config.metricsPersistencePath;
     this.loadPersistedMetrics();
+  }
 
-    if (this.config.anthropicApiKey) {
+  /**
+   * Resolve the Anthropic API key from explicit config or environment.
+   * Falls back to ANTHROPIC_API_KEY so env-based deployment works without
+   * threading the key through every constructor.
+   */
+  private resolveAnthropicApiKey(): string | undefined {
+    return this.config.anthropicApiKey || process.env.ANTHROPIC_API_KEY || undefined;
+  }
+
+  private resolveOpenAIApiKey(): string | undefined {
+    return this.config.openaiApiKey || process.env.OPENAI_API_KEY || undefined;
+  }
+
+  /**
+   * Lazily construct the Anthropic SDK client, reading the key from config or
+   * the ANTHROPIC_API_KEY environment variable. Throws a clear error when no
+   * key is available so the failure surfaces instead of producing empty output.
+   */
+  private getAnthropicClient(): Anthropic {
+    if (!this.anthropicClient) {
+      const apiKey = this.resolveAnthropicApiKey();
+      if (!apiKey) {
+        throw new Error(
+          'Anthropic API key not provided. Set ANTHROPIC_API_KEY in the environment or pass anthropicApiKey in the client config.'
+        );
+      }
       this.anthropicClient = new Anthropic({
-        apiKey: this.config.anthropicApiKey,
+        apiKey,
+        timeout: this.config.timeoutMs,
       });
     }
+    return this.anthropicClient;
+  }
 
-    if (this.config.openaiApiKey) {
+  private getOpenAIClient(): OpenAI {
+    if (!this.openaiClient) {
+      const apiKey = this.resolveOpenAIApiKey();
+      if (!apiKey) {
+        throw new Error(
+          'OpenAI API key not provided. Set OPENAI_API_KEY in the environment or pass openaiApiKey in the client config.'
+        );
+      }
       this.openaiClient = new OpenAI({
-        apiKey: this.config.openaiApiKey,
+        apiKey,
+        timeout: this.config.timeoutMs,
       });
     }
+    return this.openaiClient;
   }
 
   /**
@@ -186,26 +242,29 @@ export class LLMClient {
       model?: string;
       maxTokens?: number;
       temperature?: number;
+      signal?: AbortSignal;
     } = {}
   ): Promise<LLMCallResult> {
     const model = options.model || this.config.defaultModel || 'claude-sonnet-4-6';
     const maxTokens = options.maxTokens || this.config.maxTokens || 4096;
     const startTime = Date.now();
 
-    // Estimate input tokens
-    const inputTokens = estimateTokens(prompt, model);
+    // Estimate input tokens up front; replaced with provider-reported usage when available.
+    let inputTokens = estimateTokens(prompt, model);
 
     let content = '';
     let outputTokens = 0;
 
-    if (model.startsWith('claude')) {
+    if (model.startsWith('claude') || model.startsWith('anthropic/')) {
       const result = await this.callAnthropic(prompt, model, options);
       content = result.content;
       outputTokens = result.outputTokens;
+      if (typeof result.inputTokens === 'number') inputTokens = result.inputTokens;
     } else if (model.includes('gpt')) {
       const result = await this.callOpenAI(prompt, model, options);
       content = result.content;
       outputTokens = result.outputTokens;
+      if (typeof result.inputTokens === 'number') inputTokens = result.inputTokens;
     } else {
       // Fallback to legacy simulation if no real call possible
       content = await this.simulateLLMCall(prompt, model, options.temperature);
@@ -242,22 +301,26 @@ export class LLMClient {
     prompt: string,
     model: string,
     options: any
-  ): Promise<{ content: string; outputTokens: number }> {
-    if (!this.anthropicClient) {
-      throw new Error('Anthropic API key not provided');
-    }
+  ): Promise<{ content: string; outputTokens: number; inputTokens?: number }> {
+    const client = this.getAnthropicClient();
 
-    const response = await this.anthropicClient.messages.create({
-      model: model,
-      max_tokens: options.maxTokens || this.config.maxTokens || 4096,
-      temperature: options.temperature,
-      messages: [{ role: 'user', content: prompt }],
-    });
+    const response = await client.messages.create(
+      {
+        // Strip vendor prefix (e.g. "anthropic/claude-...") for the SDK.
+        model: model.replace(/^anthropic\//, ''),
+        max_tokens: options.maxTokens || this.config.maxTokens || 4096,
+        temperature: options.temperature,
+        messages: [{ role: 'user', content: prompt }],
+      },
+      { signal: options.signal, timeout: this.config.timeoutMs }
+    );
 
-    const content = response.content[0].type === 'text' ? response.content[0].text : '';
+    const block = Array.isArray(response.content) ? response.content[0] : undefined;
+    const content = block && block.type === 'text' ? block.text : '';
     return {
       content,
-      outputTokens: response.usage.output_tokens,
+      outputTokens: response.usage?.output_tokens ?? estimateTokens(content, model),
+      inputTokens: response.usage?.input_tokens,
     };
   }
 
@@ -268,21 +331,25 @@ export class LLMClient {
     prompt: string,
     model: string,
     options: any
-  ): Promise<{ content: string; outputTokens: number }> {
-    if (!this.openaiClient) {
-      throw new Error('OpenAI API key not provided');
-    }
+  ): Promise<{ content: string; outputTokens: number; inputTokens?: number }> {
+    const client = this.getOpenAIClient();
 
-    const response = await this.openaiClient.chat.completions.create({
-      model: model,
-      messages: [{ role: 'user', content: prompt }],
-      max_tokens: options.maxTokens || this.config.maxTokens || 4096,
-      temperature: options.temperature,
-    });
+    const response = await client.chat.completions.create(
+      {
+        model: model.replace(/^openai\//, ''),
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: options.maxTokens || this.config.maxTokens || 4096,
+        temperature: options.temperature,
+      },
+      { signal: options.signal, timeout: this.config.timeoutMs }
+    );
 
+    const choice = Array.isArray(response.choices) ? response.choices[0] : undefined;
+    const content = choice?.message?.content ?? '';
     return {
-      content: response.choices[0].message.content || '',
-      outputTokens: response.usage?.completion_tokens || 0,
+      content,
+      outputTokens: response.usage?.completion_tokens ?? estimateTokens(content, model),
+      inputTokens: response.usage?.prompt_tokens,
     };
   }
 
@@ -386,7 +453,7 @@ export class LLMClient {
         totalTokens: this.totalTokens,
         callCount: this.callCount,
         updatedAt: new Date().toISOString(),
-      }, null, 2));
+      }, null, 2), { mode: 0o600 });
     } catch (error) {
       this.logger.warn('Failed to persist LLM metrics', {
         error: error instanceof Error ? error.message : String(error),

@@ -30,6 +30,9 @@ export class AttemptRunner {
   private gstackEndpoint: string;
   private maxWallTimeMs: number;
   private llmClient: LLMClient;
+  /** AbortSignal for the in-flight attempt; propagated to every LLM call so a
+   *  wall-time timeout cancels outstanding requests instead of leaking them. */
+  private currentSignal?: AbortSignal;
 
   constructor(config: {
     sandboxManager: SandboxPoolManager;
@@ -53,9 +56,6 @@ export class AttemptRunner {
   ): Promise<AttemptResult> {
     const attemptId = uuidv4();
     const startTime = Date.now();
-    const startCostUsd = this.llmClient.getTotalCostUsd();
-    const startTokens = this.llmClient.getTotalTokens();
-    const startCallCount = this.llmClient.getCallCount();
 
     // Provision sandbox
     const sandbox = await this.sandboxManager.provisionSandbox(attemptId);
@@ -69,33 +69,52 @@ export class AttemptRunner {
     let totalTokens = 0;
     let modelCallCount = 0;
 
+    // Per-attempt wall-time enforcement: abort outstanding work and reject the
+    // attempt once maxWallTimeMs elapses. The signal is propagated to every LLM
+    // call so a hung request is cancelled rather than blocking the task forever.
+    const abortController = new AbortController();
+    this.currentSignal = abortController.signal;
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutHandle = setTimeout(() => {
+        abortController.abort();
+        reject(new Error(`Attempt exceeded maxWallTimeMs (${this.maxWallTimeMs}ms)`));
+      }, this.maxWallTimeMs);
+    });
+
     try {
       // Initialize working directory
       await this.sandboxManager.executeCommand(sandbox.sandbox_id, 'mkdir -p /workspace');
-      
-      // Run agent loop
-      const deliverable = await this.runAgentLoop(
-        taskBundle,
-        config,
-        sandbox.sandbox_id,
-        (event) => {
-          traceEvents.push(event);
-          totalCost += event.cost_usd || 0;
-          if (event.event_type === 'model_call') {
-            modelCallCount++;
+
+      // Run agent loop, bounded by the wall-time timeout.
+      const deliverable = await Promise.race([
+        this.runAgentLoop(
+          taskBundle,
+          config,
+          sandbox.sandbox_id,
+          (event) => {
+            traceEvents.push(event);
+            totalCost += event.cost_usd || 0;
+            if (event.event_type === 'model_call') {
+              modelCallCount++;
+            }
+            if (event.data?.input_tokens) {
+              totalTokens += event.data.input_tokens + (event.data.output_tokens || 0);
+            }
           }
-          if (event.data?.input_tokens) {
-            totalTokens += event.data.input_tokens + (event.data.output_tokens || 0);
-          }
-        }
-      );
+        ),
+        timeoutPromise,
+      ]);
 
       const endTime = Date.now();
       const wallTimeMs = endTime - startTime;
 
-      const llmCost = Math.max(totalCost, this.llmClient.getTotalCostUsd() - startCostUsd);
-      const llmTokens = Math.max(totalTokens, this.llmClient.getTotalTokens() - startTokens);
-      const llmCalls = Math.max(modelCallCount, this.llmClient.getCallCount() - startCallCount);
+      // Attribute cost/tokens/calls from THIS attempt's trace events only.
+      // The shared LLMClient's global counters include sibling attempts running
+      // concurrently, so deltas off them mis-attribute spend (issue #60).
+      const llmCost = totalCost;
+      const llmTokens = totalTokens;
+      const llmCalls = modelCallCount;
       const toolCostUsd = this.estimateToolCost(traceEvents);
       const sandboxCostUsd = this.estimateSandboxCost(wallTimeMs);
       const totalCostUsd = llmCost + toolCostUsd + sandboxCostUsd;
@@ -132,11 +151,33 @@ export class AttemptRunner {
 
       return this.createErrorResult(attemptId, taskBundle, config, sandbox.sandbox_id, errorMessage, startTime, wallTimeMs, traceEvents, totalCost);
     } finally {
-      // Cleanup sandbox (in production, might keep for debugging)
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+      this.currentSignal = undefined;
+      // Cleanup sandbox (in production, might keep for debugging). This runs even
+      // on a wall-time timeout, so a hung attempt still releases its sandbox slot.
       await this.sandboxManager.destroySandbox(sandbox.sandbox_id).catch((error) => {
         coreLogger.error('Failed to destroy sandbox after attempt', error instanceof Error ? error : { error: String(error) });
       });
     }
+  }
+
+  /**
+   * Centralized LLM invocation for the runner.
+   *
+   * - Propagates the per-attempt AbortSignal so wall-time timeouts cancel calls.
+   * - Does NOT swallow errors: a failed LLM call rejects so the attempt is marked
+   *   errored upstream instead of fabricating empty `{}` "success" output.
+   */
+  private async callLLM(
+    prompt: string,
+    options: { model: string; temperature?: number; maxTokens?: number }
+  ): Promise<{ content: string; input_tokens: number; output_tokens: number; cost_usd: number; model_id: string; latency_ms: number }> {
+    return this.llmClient.call(prompt, {
+      model: options.model,
+      temperature: options.temperature,
+      maxTokens: options.maxTokens,
+      signal: this.currentSignal,
+    });
   }
 
   private estimateToolCost(traceEvents: TraceEvent[]): number {
@@ -210,7 +251,7 @@ export class AttemptRunner {
     const prompt = this.buildPlanPrompt(taskBundle, config);
     const model = this.llmClient.getModelByTier('tier1');
     
-    const llmResult = await this.llmClient.call(prompt, { model, temperature: 0.7 }).catch(() => ({ content: "{}", input_tokens: 0, output_tokens: 0, cost_usd: 0, model_id: model, latency_ms: 0 }));
+    const llmResult = await this.callLLM(prompt, { model, temperature: 0.7 });
     
     onTrace({
       timestamp: new Date().toISOString(),
@@ -518,7 +559,7 @@ Return a JSON array of step descriptions, e.g.:
     const prompt = this.buildSubtaskPrompt(subtask, config);
     const model = this.llmClient.getModelByTier('tier1');
     
-    const llmResult = await this.llmClient.call(prompt, { model, temperature: 0.5 }).catch(() => ({ content: "{}", input_tokens: 0, output_tokens: 0, cost_usd: 0, model_id: model, latency_ms: 0 }));
+    const llmResult = await this.callLLM(prompt, { model, temperature: 0.5 });
     
     onTrace({
       timestamp: new Date().toISOString(),
@@ -572,7 +613,7 @@ Return a JSON object with the result, e.g.:
     const prompt = this.buildDetailedPlanPrompt(taskBundle, config);
     const model = this.llmClient.getModelByTier('tier1');
     
-    const llmResult = await this.llmClient.call(prompt, { model, temperature: 0.7 }).catch(() => ({ content: "{}", input_tokens: 0, output_tokens: 0, cost_usd: 0, model_id: model, latency_ms: 0 }));
+    const llmResult = await this.callLLM(prompt, { model, temperature: 0.7 });
     
     onTrace({
       timestamp: new Date().toISOString(),
@@ -632,14 +673,7 @@ Return a JSON array of step objects, e.g.:
   ): Promise<string> {
     const prompt = this.buildStepExecutionPrompt(step, config);
     const model = this.llmClient.getModelByTier('tier1');
-    const llmResult = await this.llmClient.call(prompt, { model, temperature: 0.4 }).catch(() => ({
-      content: '{}',
-      input_tokens: 0,
-      output_tokens: 0,
-      cost_usd: 0,
-      model_id: model,
-      latency_ms: 0,
-    }));
+    const llmResult = await this.callLLM(prompt, { model, temperature: 0.4 });
 
     onTrace({
       timestamp: new Date().toISOString(),
@@ -691,7 +725,7 @@ Return strict JSON:
     const prompt = this.buildDecisionPrompt(state, config);
     const model = this.llmClient.getModelByTier('tier1');
     
-    const llmResult = await this.llmClient.call(prompt, { model, temperature: 0.5 }).catch(() => ({ content: "{}", input_tokens: 0, output_tokens: 0, cost_usd: 0, model_id: model, latency_ms: 0 }));
+    const llmResult = await this.callLLM(prompt, { model, temperature: 0.5 });
     
     onTrace({
       timestamp: new Date().toISOString(),
@@ -751,14 +785,7 @@ Return a JSON object with the decision, e.g.:
   ): Promise<string> {
     const prompt = this.buildActionExecutionPrompt(action, config);
     const model = this.llmClient.getModelByTier('tier1');
-    const llmResult = await this.llmClient.call(prompt, { model, temperature: 0.4 }).catch(() => ({
-      content: '{}',
-      input_tokens: 0,
-      output_tokens: 0,
-      cost_usd: 0,
-      model_id: model,
-      latency_ms: 0,
-    }));
+    const llmResult = await this.callLLM(prompt, { model, temperature: 0.4 });
 
     onTrace({
       timestamp: new Date().toISOString(),
