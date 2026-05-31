@@ -35,6 +35,23 @@ export class BudgetLedger {
   private reservations = new Map<string, BudgetReservation>();
   private spend: SpendEntry[] = [];
   private auditDir: string;
+  /** Serializes the reserve→commit critical section so concurrent callers
+   *  cannot collectively exceed max_budget_usd or scope caps (see issue #53). */
+  private lockChain: Promise<void> = Promise.resolve();
+
+  /**
+   * Run `fn` under the ledger's async mutex. Calls are serialized in FIFO order;
+   * a rejection in one call does not break the chain for subsequent callers.
+   */
+  private async withLock<T>(fn: () => T | Promise<T>): Promise<T> {
+    const run = this.lockChain.then(() => fn());
+    // Keep the chain alive regardless of whether `run` resolves or rejects.
+    this.lockChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
 
   constructor(
     private config: BudgetLedgerConfig,
@@ -86,7 +103,36 @@ export class BudgetLedger {
     return reservation;
   }
 
+  /**
+   * Atomically reserve then commit under the ledger lock. This is the
+   * concurrency-safe path for parallel attempts: the budget/scope check, the
+   * reservation insert, and the spend commit all happen without any other
+   * reserve/commit interleaving, so concurrent callers can never collectively
+   * exceed max_budget_usd or scope caps.
+   */
+  async reserveAndCommit(
+    operation: string,
+    reserveUsd: number,
+    actualCostUsd: number,
+    ttlMs?: number,
+    metadata?: Record<string, any>,
+    spend?: Omit<SpendEntry, 'timestamp' | 'cost_usd' | 'reservation_id'>,
+  ): Promise<BudgetReservation> {
+    return this.withLock(async () => {
+      const reservation = this.reserve(operation, reserveUsd, ttlMs, metadata);
+      return this.commitInternal(reservation.id, actualCostUsd, spend);
+    });
+  }
+
   async commit(
+    reservationId: string,
+    actualCostUsd: number,
+    spend?: Omit<SpendEntry, 'timestamp' | 'cost_usd' | 'reservation_id'>,
+  ): Promise<BudgetReservation> {
+    return this.withLock(() => this.commitInternal(reservationId, actualCostUsd, spend));
+  }
+
+  private async commitInternal(
     reservationId: string,
     actualCostUsd: number,
     spend?: Omit<SpendEntry, 'timestamp' | 'cost_usd' | 'reservation_id'>,

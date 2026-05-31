@@ -28,30 +28,59 @@ import { InProcessSandboxBackend, isDockerAvailable } from './sandbox-inprocess.
  */
 export class SandboxPoolManager {
   private activeSandboxes: Map<string, Sandbox>;
-  private pendingQueue: Array<{ attemptId: string; config: SandboxConfig; resolve: (s: Sandbox) => void }>;
+  private pendingQueue: Array<{ attemptId: string; config: SandboxConfig; resolve: (s: Sandbox) => void; reject: (e: Error) => void }>;
   private maxConcurrency: number;
+  private maxQueueDepth: number;
   private backend: SandboxConfig['backend'];
+  private backendExplicit: boolean;
+  private backendResolved?: Promise<SandboxConfig['backend']>;
   private mockMode: boolean;
   private inProcessBackend: InProcessSandboxBackend;
 
   constructor(config: {
     maxConcurrency?: number;
     backend?: SandboxConfig['backend'];
+    maxQueueDepth?: number;
   } = {}) {
     this.activeSandboxes = new Map();
     this.pendingQueue = [];
     this.maxConcurrency = config.maxConcurrency || 5;
+    // Bound the pending queue so the sandbox layer cannot grow without limit
+    // under sustained over-subscription (issue #59).
+    this.maxQueueDepth = config.maxQueueDepth
+      ?? Number(process.env.GORCH_SANDBOX_MAX_QUEUE_DEPTH ?? 100);
     this.mockMode = process.env.MOCK_SANDBOX === '1';
     
     // Auto-detect backend: use config if provided, otherwise check Docker availability
     const configBackend = config.backend || process.env.SANDBOX_BACKEND as SandboxConfig['backend'];
-    if (configBackend) {
-      this.backend = configBackend;
-    } else {
-      this.backend = 'docker'; // Default to docker, will fall back to inprocess if unavailable
-    }
-    
+    this.backendExplicit = Boolean(configBackend);
+    this.backend = configBackend || 'docker'; // default to docker, auto-fall back to inprocess if unavailable
     this.inProcessBackend = new InProcessSandboxBackend();
+  }
+
+  /**
+   * Resolve the effective backend, auto-falling back to in-process when Docker
+   * is the (default) target but is not available on the host (issue #52).
+   * Memoized so the `docker info` probe runs at most once. An explicitly
+   * configured backend is respected as-is (no silent override).
+   */
+  private async resolveBackend(): Promise<SandboxConfig['backend']> {
+    if (this.backendResolved) return this.backendResolved;
+    this.backendResolved = (async () => {
+      if (this.mockMode) return 'inprocess';
+      if (this.backend === 'docker' && !this.backendExplicit) {
+        const dockerUp = await isDockerAvailable();
+        if (!dockerUp) {
+          coreLogger.warn(
+            'Docker not available; falling back to in-process sandbox backend (no OS-level isolation). ' +
+            'Set SANDBOX_BACKEND explicitly to silence this.'
+          );
+          this.backend = 'inprocess';
+        }
+      }
+      return this.backend;
+    })();
+    return this.backendResolved;
   }
 
   /**
@@ -61,8 +90,9 @@ export class SandboxPoolManager {
     attemptId: string,
     config?: Partial<SandboxConfig>
   ): Promise<Sandbox> {
+    const effectiveBackend = await this.resolveBackend();
     const fullConfig: SandboxConfig = {
-      backend: this.backend,
+      backend: effectiveBackend,
       image: config?.image || 'node:20-alpine',
       resource_limits: config?.resource_limits || {
         cpu_cores: 2,
@@ -77,8 +107,13 @@ export class SandboxPoolManager {
 
     // Check if we can provision immediately or need to queue
     if (this.activeSandboxes.size >= this.maxConcurrency) {
-      return new Promise((resolve) => {
-        this.pendingQueue.push({ attemptId, config: fullConfig, resolve });
+      if (this.pendingQueue.length >= this.maxQueueDepth) {
+        throw new Error(
+          `Sandbox queue full (${this.pendingQueue.length}/${this.maxQueueDepth}); rejecting provision for ${attemptId}`
+        );
+      }
+      return new Promise<Sandbox>((resolve, reject) => {
+        this.pendingQueue.push({ attemptId, config: fullConfig, resolve, reject });
       });
     }
 
@@ -121,9 +156,16 @@ export class SandboxPoolManager {
       sandbox.state = 'ready';
       sandbox.started_at = new Date().toISOString();
     } catch (error) {
+      // Uniform failure contract (issue #59): resolve a registered failed
+      // sandbox instead of throwing, so immediate and queued callers behave
+      // identically and the failed id is destroyable/known in activeSandboxes.
       sandbox.state = 'failed';
       sandbox.error_message = error instanceof Error ? error.message : String(error);
-      throw error;
+      coreLogger.error('Failed to provision sandbox', {
+        attemptId,
+        sandbox_id: sandboxId,
+        error: sandbox.error_message,
+      });
     }
 
     return sandbox;
@@ -454,26 +496,26 @@ export class SandboxPoolManager {
     const dockerArgs = this.buildDockerExecArgs(containerName, command, cwd);
 
     return new Promise((resolve, reject) => {
-      const process = spawn('docker', dockerArgs);
+      const child = spawn('docker', dockerArgs);
 
       let stdout = '';
       let stderr = '';
 
-      process.stdout?.on('data', (data) => {
+      child.stdout?.on('data', (data) => {
         stdout += data;
         onOutput(data.toString(), '');
       });
 
-      process.stderr?.on('data', (data) => {
+      child.stderr?.on('data', (data) => {
         stderr += data;
         onOutput('', data.toString());
       });
 
-      process.on('close', (code) => {
+      child.on('close', (code) => {
         resolve(code || 0);
       });
 
-      process.on('error', (error) => {
+      child.on('error', (error) => {
         reject(error);
       });
     });
@@ -644,23 +686,14 @@ export class SandboxPoolManager {
     while (this.pendingQueue.length > 0 && this.activeSandboxes.size < this.maxConcurrency) {
       const next = this.pendingQueue.shift();
       if (next) {
+        // createSandbox now resolves a registered failed sandbox on error
+        // (uniform contract, issue #59) — no synthetic untracked id.
         this.createSandbox(next.attemptId, next.config)
           .then(next.resolve)
           .catch((error) => {
-            coreLogger.error('Failed to provision sandbox', {
-              attemptId: next.attemptId,
-              error: error instanceof Error ? error.message : String(error),
-            });
-            // Create failed sandbox to allow caller to handle error
-            const failedSandbox: Sandbox = {
-              sandbox_id: uuidv4(),
-              config: next.config,
-              state: 'failed',
-              attempt_id: next.attemptId,
-              created_at: new Date().toISOString(),
-              error_message: error instanceof Error ? error.message : String(error),
-            };
-            next.resolve(failedSandbox);
+            // Defensive: createSandbox should not reject, but if it ever does,
+            // surface the rejection to the queued caller instead of hanging.
+            next.reject(error instanceof Error ? error : new Error(String(error)));
           });
       }
     }

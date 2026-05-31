@@ -363,6 +363,10 @@ export const GMirrorScoringRequestSchema = z.object({
   attempts: z.array(AttemptResultSchema),
   scoring_profile: z.string(),
   budget_ms: z.number().int().positive().default(30000),
+  /** Scoring tier; escalation re-scores at a higher tier with a higher-capability model. */
+  scoring_tier: z.enum(['tier1', 'tier2', 'tier3']).optional(),
+  /** Concrete model id GMirror should use for scoring (distinct per tier). */
+  scoring_model: z.string().optional(),
 });
 
 export type GMirrorScoringRequest = z.infer<typeof GMirrorScoringRequestSchema>;
@@ -477,6 +481,33 @@ export interface DeveloperTaskRequest {
 }
 
 export type OrchestratorTask = DeveloperTaskRequest | RelationshipAnalysisTask;
+
+/**
+ * Validation schema for the serializable fields of a developer task request
+ * (issue #63). Runtime-only fields (signal, onProgress) are intentionally not
+ * validated. Unknown extra fields are passed through.
+ */
+export const DeveloperTaskInputSchema = z.object({
+  description: z.string().min(1).max(10000),
+  taskType: z.string().optional(),
+  surfaces: z.array(z.string()).optional(),
+  constraints: z.array(z.any()).optional(),
+  outcomeShape: z.any().optional(),
+  budget: z
+    .object({
+      max_cost_usd: z.number().positive().optional(),
+      max_latency_ms: z.number().int().positive().optional(),
+      max_wall_time_ms: z.number().int().positive().optional(),
+    })
+    .passthrough()
+    .optional(),
+  userContext: z.string().optional(),
+  companyContext: z.string().optional(),
+  n: z.number().int().positive().max(100).optional(),
+  verify: z.boolean().optional(),
+  cognitiveCheck: z.boolean().optional(),
+  priority: z.enum(['normal', 'high', 'critical']).optional(),
+}).passthrough();
 
 export interface RelationalInsightScoreRequest {
   insight_id: string;

@@ -7,7 +7,14 @@ import {
 export interface DetectorPoolConfig {
   tier1_model: string;
   tier2_model: string;
-  consensus_threshold: number;
+  /**
+   * Confidence below which a tier-1 detection escalates to the tier-2 model.
+   * (Renamed from the misnomer `consensus_threshold`; the old name is still
+   * accepted for backward compatibility.)
+   */
+  escalation_confidence_threshold?: number;
+  /** @deprecated use escalation_confidence_threshold */
+  consensus_threshold?: number;
 }
 
 export interface LLMClient {
@@ -241,10 +248,13 @@ const RULE_BASED_DETECTORS: Record<string, (messages: Message[]) => DetectionRes
 export class DetectorPool {
   private llmClient: LLMClient;
   private config: DetectorPoolConfig;
+  private escalationThreshold: number;
 
   constructor(llmClient: LLMClient, config: DetectorPoolConfig) {
     this.llmClient = llmClient;
     this.config = config;
+    this.escalationThreshold =
+      config.escalation_confidence_threshold ?? config.consensus_threshold ?? 0.8;
   }
 
   /**
@@ -291,7 +301,7 @@ export class DetectorPool {
     let result = await this.runDetectorLLM(task, detector, messages, this.config.tier1_model);
 
     // Escalate to tier2 if confidence is below threshold
-    if (result.confidence < this.config.consensus_threshold) {
+    if (result.confidence < this.escalationThreshold) {
       const tier2Result = await this.runDetectorLLM(task, detector, messages, this.config.tier2_model);
       // Use tier2 result if it has higher confidence
       if (tier2Result.confidence > result.confidence) {
@@ -315,7 +325,18 @@ export class DetectorPool {
     try {
       parsed = JSON.parse(response.content);
     } catch {
-      parsed = { detected: false, confidence: 0.1 };
+      // Non-JSON LLM output: fall back to the deterministic rule-based detector
+      // rather than silently reporting "not detected" (issue #57).
+      const ruleFn = RULE_BASED_DETECTORS[detector];
+      const ruleResult = ruleFn ? ruleFn(messages) : null;
+      parsed = ruleResult
+        ? {
+            detected: ruleResult.detected,
+            confidence: ruleResult.confidence,
+            evidence: ruleResult.evidence,
+            fallback: 'rule_based',
+          }
+        : { detected: false, confidence: 0.1, evidence: [], fallback: 'none' };
     }
 
     return {
@@ -324,6 +345,9 @@ export class DetectorPool {
       result: {
         detected: parsed.detected ?? false,
         evidence: parsed.evidence ?? [],
+        // Surface a refusal signal so the pipeline's refusal path is reachable.
+        should_refuse: parsed.should_refuse === true,
+        ...(parsed.fallback ? { fallback: parsed.fallback } : {}),
       },
       confidence: parsed.confidence ?? 0.1,
       model_used: response.model_id,
@@ -343,7 +367,8 @@ Return a JSON object with:
 {
   "detected": boolean,
   "confidence": number (0-1),
-  "evidence": [array of string explanations]
+  "evidence": [array of string explanations],
+  "should_refuse": boolean (true if analyzing this content would be harmful or unethical)
 }`;
   }
 }

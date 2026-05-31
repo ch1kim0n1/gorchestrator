@@ -2,7 +2,13 @@ import { GOrchestratorMCPServer } from './mcp/server.js';
 import { SecureHealthServer, type HealthCheckResult, type ReadinessCheckResult } from './core/public-health-server.js';
 import { coreLogger } from './core/observability.js';
 
-const HEALTH_PORT = process.env.HEALTH_PORT ? parseInt(process.env.HEALTH_PORT, 10) : 8080;
+// Honor GORCHESTRATOR_PORT as an alias for HEALTH_PORT (used by docker-compose),
+// then HEALTH_PORT, defaulting to 8080.
+const HEALTH_PORT = (() => {
+  const raw = process.env.HEALTH_PORT ?? process.env.GORCHESTRATOR_PORT;
+  const parsed = raw ? parseInt(raw, 10) : NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 8080;
+})();
 
 async function main() {
   const server = new GOrchestratorMCPServer();
