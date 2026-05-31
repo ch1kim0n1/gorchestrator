@@ -103,5 +103,9 @@
   "engines": {
     "node": ">=18.0.0"
   },
+  "keywords": ["orchestrator", "llm", "multi-model", "task-runner", "ai-agent"],
+  "repository": {"type": "git", "url": "https://github.com/ch1kim0n1/gorchestrator.git"},
+  "homepage": "https://github.com/ch1kim0n1/gorchestrator#readme",
+  "bugs": {"url": "https://github.com/ch1kim0n1/gorchestrator/issues"},
   "license": "MIT"
 }

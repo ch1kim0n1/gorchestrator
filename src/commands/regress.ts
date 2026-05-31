@@ -49,15 +49,12 @@ function loadRecentScoredAttempts(persistence: OrchestratorPersistenceManager, n
   hard_gates_passed: boolean;
   timestamp: string;
 }> {
-  // We query across all tasks, just need recent scores
-  const db = (persistence as any).db;
-  return db.prepare(`
-    SELECT attempt_id, overall_score, correctness_score, efficiency_score, completeness_score,
-           hard_gates_passed, timestamp
-    FROM scored_attempts
-    ORDER BY timestamp DESC
-    LIMIT ?
-  `).all(n);
+  // Use typed method to get recent scored attempts
+  const rows = persistence.getScoredAttemptsForRegression(n);
+  return rows.map(r => ({
+    ...r,
+    hard_gates_passed: r.hard_gates_passed === 1,
+  }));
 }
 
 export async function regressCommand(task: string, options: RegressOptions): Promise<void> {

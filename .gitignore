@@ -1,12 +1,20 @@
 node_modules/
 dist/
-coverage/
-*.env
+build/
+*.js.map
 .env
+.env.*
+!.env.example
+coverage/
+.nyc_output/
 .DS_Store
 *.log
+*.db
+*.db-shm
+*.db-wal
+success_rate_history.json
 
-# Runtime data — never commit
+# Runtime data â€“ never commit
 node_modules/
 *.db
 *.sqlite

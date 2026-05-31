@@ -174,6 +174,24 @@ export class OrchestratorPersistenceManager {
     return rows.map((r) => ({ ...r, hard_gates_passed: r.hard_gates_passed === 1 }));
   }
 
+  getScoredAttemptsForRegression(limit: number): Array<{
+    attempt_id: string;
+    overall_score: number;
+    correctness_score: number | null;
+    efficiency_score: number | null;
+    completeness_score: number | null;
+    hard_gates_passed: number; // SQLite stores booleans as 0/1
+    timestamp: string;
+  }> {
+    return this.db.prepare(`
+      SELECT attempt_id, overall_score, correctness_score, efficiency_score,
+             completeness_score, hard_gates_passed, timestamp
+      FROM scored_attempts
+      ORDER BY timestamp DESC
+      LIMIT ?
+    `).all(limit) as any[];
+  }
+
   getTaskRuns(limit: number = 100): Array<{
     task_id: string;
     description: string;
@@ -242,76 +260,135 @@ export class OrchestratorPersistenceManager {
       attempt_results: this.db.prepare('SELECT * FROM attempt_results ORDER BY timestamp DESC').all(),
       scored_attempts: this.db.prepare('SELECT * FROM scored_attempts ORDER BY timestamp DESC').all(),
       task_runs: this.db.prepare('SELECT * FROM task_runs ORDER BY timestamp DESC').all(),
-      migrations: this.db.prepare('SELECT * FROM migrations ORDER BY version ASC').all(),
-      metadata: this.db.prepare('SELECT * FROM persistence_metadata ORDER BY key ASC').all(),
     };
   }
 
-  close(): void {
-    this.db.close();
-  }
-
-  getDbPath(): string {
-    return this.dbPath;
-  }
-
-  private runMigrations(fromVersion: number): void {
-    const migrations = this.loadMigrations();
-    for (const migration of migrations) {
-      if (migration.version <= fromVersion || migration.version > this.SCHEMA_VERSION) {
-        continue;
+  importJson(data: Record<string, any>): void {
+    this.transaction(() => {
+      for (const row of data.attempt_results || []) {
+        this.db.prepare(`
+          INSERT OR REPLACE INTO attempt_results
+          (attempt_id, task_id, agent_config_id, status, output, error, duration_ms, cost_usd, timestamp)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(row.attempt_id, row.task_id, row.agent_config_id, row.status, row.output, row.error, row.duration_ms, row.cost_usd, row.timestamp);
       }
-      this.db.transaction(() => {
-        this.executeStatements(migration.sql);
-        this.db.prepare('INSERT OR REPLACE INTO migrations (version, name, applied_at) VALUES (?, ?, ?)').run(
+      for (const row of data.scored_attempts || []) {
+        this.db.prepare(`
+          INSERT OR REPLACE INTO scored_attempts
+          (attempt_id, task_id, overall_score, correctness_score, efficiency_score, completeness_score, hard_gates_passed, timestamp)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(row.attempt_id, row.task_id, row.overall_score, row.correctness_score, row.efficiency_score, row.completeness_score, row.hard_gates_passed, row.timestamp);
+      }
+      for (const row of data.task_runs || []) {
+        this.db.prepare(`
+          INSERT OR REPLACE INTO task_runs
+          (task_id, description, total_attempts, successful_attempts, total_cost_usd, total_duration_ms, winner_attempt_id, timestamp)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(row.task_id, row.description, row.total_attempts, row.successful_attempts, row.total_cost_usd, row.total_duration_ms, row.winner_attempt_id, row.timestamp);
+      }
+    });
+  }
+
+  query(sql: string, params: any[] = []): any[] {
+    return this.db.prepare(sql).all(...params);
+  }
+
+  runMigrations(fromVersion: number): void {
+    const migrations = [
+      { version: 1, sql: `
+        CREATE TABLE IF NOT EXISTS attempt_results (
+          attempt_id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL,
+          agent_config_id TEXT NOT NULL,
+          status TEXT NOT NULL,
+          output TEXT,
+          error TEXT,
+          duration_ms INTEGER NOT NULL,
+          cost_usd REAL NOT NULL,
+          timestamp TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_attempt_results_task_id ON attempt_results(task_id);
+        CREATE TABLE IF NOT EXISTS scored_attempts (
+          attempt_id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL,
+          overall_score REAL NOT NULL,
+          correctness_score REAL,
+          efficiency_score REAL,
+          completeness_score REAL,
+          hard_gates_passed INTEGER NOT NULL,
+          timestamp TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_scored_attempts_task_id ON scored_attempts(task_id);
+        CREATE TABLE IF NOT EXISTS task_runs (
+          task_id TEXT PRIMARY KEY,
+          description TEXT NOT NULL,
+          total_attempts INTEGER NOT NULL,
+          successful_attempts INTEGER NOT NULL,
+          total_cost_usd REAL NOT NULL,
+          total_duration_ms INTEGER NOT NULL,
+          winner_attempt_id TEXT,
+          timestamp TEXT NOT NULL
+        );
+      `},
+      { version: 2, sql: `
+        -- Migration 002: Add composite indexes for common query patterns
+        CREATE INDEX IF NOT EXISTS idx_attempt_results_timestamp ON attempt_results(timestamp DESC);
+        CREATE INDEX IF NOT EXISTS idx_scored_attempts_timestamp ON scored_attempts(timestamp DESC);
+        CREATE INDEX IF NOT EXISTS idx_scored_attempts_overall_score ON scored_attempts(overall_score DESC);
+        CREATE INDEX IF NOT EXISTS idx_task_runs_timestamp ON task_runs(timestamp DESC);
+      `},
+    ];
+
+    for (const migration of migrations) {
+      if (migration.version > fromVersion) {
+        this.db.exec(migration.sql);
+        this.db.prepare('INSERT INTO migrations (version, name, applied_at) VALUES (?, ?, ?)').run(
           migration.version,
-          migration.name,
+          `migration_${migration.version.toString().padStart(3, '0')}`,
           new Date().toISOString()
         );
-      })();
-    }
-  }
-
-  private loadMigrations(): Array<{ version: number; name: string; sql: string }> {
-    const migrationDirCandidates = [
-      path.join(__dirname, 'migrations'),
-      path.join(__dirname, '../migrations'),
-      path.join(__dirname, '../../src/core/migrations'),
-      path.join(__dirname, '../../../src/core/migrations'),
-      path.join(process.cwd(), 'src/core/migrations'),
-      path.join(process.cwd(), 'migrations'),
-      path.join(process.cwd(), '.gorchestrator', 'migrations'),
-    ];
-    const migrationDir = migrationDirCandidates.find(dir => fs.existsSync(dir));
-    if (!migrationDir) {
-      return [];
-    }
-    return fs.readdirSync(migrationDir)
-      .filter(file => file.endsWith('.sql'))
-      .sort()
-      .map(file => ({
-        version: Number(file.split('_')[0]),
-        name: file.replace(/^\d+_/, '').replace(/\.sql$/, ''),
-        sql: fs.readFileSync(path.join(migrationDir, file), 'utf8'),
-      }));
-  }
-
-  private executeStatements(sql: string): void {
-    for (const statement of sql.split(/;\s*(?:\r?\n|$)/)) {
-      const trimmed = statement.trim();
-      if (trimmed) {
-        this.db.exec(trimmed);
       }
     }
   }
 
-  private rotateBackups(): void {
-    const backups = fs.readdirSync(this.backupDir)
-      .filter(name => /^gorchestrator-.+\.db$/.test(name))
-      .map(name => path.join(this.backupDir, name))
-      .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
-    for (const stale of backups.slice(this.backupRetentionCount)) {
-      fs.unlinkSync(stale);
+  rotateBackups(): void {
+    try {
+      if (!fs.existsSync(this.backupDir)) return;
+      const backups = fs.readdirSync(this.backupDir)
+        .filter(f => f.startsWith('gorchestrator-') && f.endsWith('.db'))
+        .map(f => ({ name: f, path: path.join(this.backupDir, f), stat: fs.statSync(path.join(this.backupDir, f)) }))
+        .sort((a, b) => b.stat.mtime.getTime() - a.stat.mtime.getTime());
+      while (backups.length > this.backupRetentionCount) {
+        const toDelete = backups.pop();
+        if (toDelete) {
+          try {
+            fs.unlinkSync(toDelete.path);
+          } catch {}
+        }
+      }
+    } catch {}
+  }
+
+  close(): void {
+    if (this.db) {
+      this.db.close();
+    }
+  }
+
+  healthCheck(): { healthy: boolean; error?: string; recordCount?: number } {
+    try {
+      const attemptCount = this.db.prepare('SELECT COUNT(*) as count FROM attempt_results').get() as { count: number };
+      const scoredCount = this.db.prepare('SELECT COUNT(*) as count FROM scored_attempts').get() as { count: number };
+      const runCount = this.db.prepare('SELECT COUNT(*) as count FROM task_runs').get() as { count: number };
+      return {
+        healthy: true,
+        recordCount: attemptCount.count + scoredCount.count + runCount.count,
+      };
+    } catch (error) {
+      return {
+        healthy: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
     }
   }
 }
