@@ -22,7 +22,7 @@ const program = new Command();
 program
   .name('gorchestrator')
   .description('Parallel agent execution manager for the G-Stack')
-  .version('0.1.0');
+  .version('0.5.0'); // keep in sync with package.json "version"
 
 program
   .command('backup [destination]')

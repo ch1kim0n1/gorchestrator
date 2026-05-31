@@ -40041,7 +40041,7 @@ var gstack_gbrain_sync_js_1 = require_gstack_gbrain_sync();
 var security_js_1 = require_security();
 var performance_js_1 = require_performance();
 var program = new commander_1.Command();
-program.name("gorchestrator").description("Parallel agent execution manager for the G-Stack").version("0.1.0");
+program.name("gorchestrator").description("Parallel agent execution manager for the G-Stack").version("0.5.0");
 program.command("backup [destination]").description("Backup GOrchestrator SQLite state").option("--json", "Output as JSON").option("--quiet", "Suppress output for CI use").action(async (destination, options) => {
   const persistence = new orchestrator_persistence_js_1.OrchestratorPersistenceManager();
   try {

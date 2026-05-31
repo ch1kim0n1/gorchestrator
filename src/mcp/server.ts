@@ -50,7 +50,7 @@ class GOrchestratorMCPServer {
     this.server = new Server(
       {
         name: 'gorchestrator',
-        version: '0.1.0',
+        version: '0.5.0', // keep in sync with package.json "version"
       },
       {
         capabilities: {
