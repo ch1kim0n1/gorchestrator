@@ -4,6 +4,34 @@
 npm install gorchestrator
 ```
 
+### Install from PyPI (`pip install gorchestrator`)
+
+Prefer `pip`? The CLI is also published to PyPI. The Python package does not
+reimplement the tool — it bundles the JavaScript build and launches it with
+your own Node.js runtime.
+
+**Prerequisite:** Node.js **>= 18** must be installed and on your `PATH`
+(`node --version`). Get it from <https://nodejs.org/>.
+
+```bash
+pip install gorchestrator
+gorchestrator --help
+gorchestrator --version
+```
+
+Notes:
+
+- The `gorchestrator` command launches the bundled CLI via `node`. If Node.js is
+  missing or older than 18, you get a clear error and a non-zero exit code.
+- **Optional SQLite persistence.** Durable run history uses the native
+  `better-sqlite3` engine. The pip distribution cannot ship a compiled native
+  addon, so if `better-sqlite3` is not available the CLI automatically falls
+  back to a **volatile in-memory store** (data lives only for the process).
+  To require durable SQLite persistence (hard-fail when it is unavailable), set
+  `GORCHESTRATOR_REQUIRE_SQLITE=1`. To get durable persistence under pip,
+  install Node and run `npm install better-sqlite3` in a project where Node can
+  resolve it, or use the npm install instead.
+
 ```typescript
 import { GStackSDK } from 'gorchestrator';
 const stack = new GStackSDK({ apiKey: process.env.ANTHROPIC_API_KEY });

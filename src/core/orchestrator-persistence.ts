@@ -5,7 +5,13 @@ import * as fs from 'fs';
  * SQLite Persistence Manager for GOrchestrator
  *
  * Stores attempt results, scored attempts, and task runs.
- * Persistence is REQUIRED - fails if better-sqlite3 cannot be loaded.
+ *
+ * Backed by the native `better-sqlite3` engine when it is available (built for
+ * the host). When the native binding cannot be loaded — for example in the
+ * PyPI/pip distribution, which bundles the JS but cannot ship a compiled native
+ * addon — the manager transparently falls back to a volatile in-memory store so
+ * the CLI keeps working. Set GORCHESTRATOR_REQUIRE_SQLITE=1 to restore the
+ * historical hard-fail behavior when durable persistence is mandatory.
  */
 export class OrchestratorPersistenceManager {
   private db: any;
@@ -13,6 +19,8 @@ export class OrchestratorPersistenceManager {
   private readonly SCHEMA_VERSION = 2;
   private backupDir: string;
   private backupRetentionCount: number;
+  /** True when running on the volatile in-memory fallback (no better-sqlite3). */
+  public readonly inMemory: boolean = false;
 
   constructor(dbPath?: string) {
     this.dbPath = dbPath || process.env.GORCHESTRATOR_DB_PATH || path.join(process.cwd(), '.gorchestrator', 'data', 'orchestrator.db');
@@ -20,6 +28,8 @@ export class OrchestratorPersistenceManager {
     this.backupDir = process.env.GORCHESTRATOR_BACKUP_DIR || path.join(dataDir, 'backups');
     this.backupRetentionCount = Math.max(1, Number(process.env.GORCHESTRATOR_BACKUP_RETENTION || '10'));
     try {
+      // Lazy require so esbuild can keep better-sqlite3 external and the module
+      // is only resolved when this class is actually constructed.
       const Database = require('better-sqlite3');
       fs.mkdirSync(dataDir, { recursive: true });
       this.db = new Database(this.dbPath);
@@ -27,7 +37,15 @@ export class OrchestratorPersistenceManager {
       this.db.pragma('foreign_keys = ON');
       this.initializeSchema();
     } catch (error) {
-      throw new Error(`Persistence initialization failed: ${error}. Persistence is REQUIRED for GOrchestrator.`);
+      if (process.env.GORCHESTRATOR_REQUIRE_SQLITE === '1') {
+        throw new Error(`Persistence initialization failed: ${error}. Persistence is REQUIRED for GOrchestrator.`);
+      }
+      // Graceful degradation: better-sqlite3 is unavailable (e.g. no native
+      // toolchain / pip-installed bundle). Use a volatile in-memory shim that
+      // implements the same minimal SQL surface this class relies on.
+      this.db = new InMemoryDatabase();
+      (this as { inMemory: boolean }).inMemory = true;
+      this.initializeSchema();
     }
   }
 
@@ -228,13 +246,21 @@ export class OrchestratorPersistenceManager {
 
   backup(destinationPath?: string): string {
     fs.mkdirSync(this.backupDir, { recursive: true });
+    const isJsonBackup = this.inMemory;
+    const ext = isJsonBackup ? 'json' : 'db';
     const backupPath = destinationPath || path.join(
       this.backupDir,
-      `gorchestrator-${new Date().toISOString().replace(/[:.]/g, '-')}.db`
+      `gorchestrator-${new Date().toISOString().replace(/[:.]/g, '-')}.${ext}`
     );
     fs.mkdirSync(path.dirname(backupPath), { recursive: true });
-    this.db.pragma('wal_checkpoint(TRUNCATE)');
-    fs.copyFileSync(this.dbPath, backupPath);
+    if (isJsonBackup) {
+      // No native DB file to copy; serialize the in-memory state to JSON so the
+      // backup command still produces a usable artifact.
+      fs.writeFileSync(backupPath, JSON.stringify(this.exportJson(), null, 2));
+    } else {
+      this.db.pragma('wal_checkpoint(TRUNCATE)');
+      fs.copyFileSync(this.dbPath, backupPath);
+    }
     this.rotateBackups();
     return backupPath;
   }
@@ -242,6 +268,11 @@ export class OrchestratorPersistenceManager {
   restore(sourcePath: string): void {
     if (!fs.existsSync(sourcePath)) {
       throw new Error(`Backup does not exist: ${sourcePath}`);
+    }
+    if (this.inMemory) {
+      // Restore from a JSON backup into the in-memory store.
+      this.importJson(JSON.parse(fs.readFileSync(sourcePath, 'utf8')));
+      return;
     }
     this.db.close();
     fs.copyFileSync(sourcePath, this.dbPath);
@@ -390,5 +421,145 @@ export class OrchestratorPersistenceManager {
         error: error instanceof Error ? error.message : String(error),
       };
     }
+  }
+}
+
+/**
+ * Volatile, dependency-free fallback used when better-sqlite3 cannot be loaded.
+ *
+ * It is NOT a general SQL engine. It implements only the fixed set of
+ * statements OrchestratorPersistenceManager issues, matched by a stable
+ * substring of each SQL string. Data lives only for the process lifetime, which
+ * is acceptable for the pip-installed bundle where the native engine is absent.
+ */
+class InMemoryDatabase {
+  private tables: {
+    schema_version: Array<{ version: number; applied_at: string }>;
+    migrations: Array<{ version: number; name: string; applied_at: string }>;
+    attempt_results: any[];
+    scored_attempts: any[];
+    task_runs: any[];
+  } = {
+    schema_version: [],
+    migrations: [],
+    attempt_results: [],
+    scored_attempts: [],
+    task_runs: [],
+  };
+
+  pragma(_directive: string): void {
+    // No-op: journaling / foreign-key pragmas are meaningless in memory.
+  }
+
+  exec(_sql: string): void {
+    // DDL (CREATE TABLE/INDEX) is a no-op; tables already exist as arrays.
+  }
+
+  transaction<T>(operation: (...args: any[]) => T): (...args: any[]) => T {
+    // No real atomicity guarantees, but preserves the call signature.
+    return (...args: any[]) => operation(...args);
+  }
+
+  close(): void {
+    // Nothing to release.
+  }
+
+  prepare(sql: string): {
+    run: (...params: any[]) => void;
+    get: (...params: any[]) => any;
+    all: (...params: any[]) => any[];
+  } {
+    const norm = sql.replace(/\s+/g, ' ').trim();
+    const tables = this.tables;
+
+    const upsert = (table: any[], keyField: string, row: Record<string, any>) => {
+      const idx = table.findIndex((r) => r[keyField] === row[keyField]);
+      if (idx >= 0) table[idx] = row;
+      else table.push(row);
+    };
+    const byTimestampDesc = (rows: any[]) =>
+      [...rows].sort((a, b) => String(b.timestamp).localeCompare(String(a.timestamp)));
+
+    return {
+      run: (...params: any[]) => {
+        if (norm.includes('INSERT OR REPLACE INTO schema_version')) {
+          upsert(tables.schema_version, 'version', { version: params[0], applied_at: params[1] });
+        } else if (norm.includes('INSERT INTO migrations')) {
+          tables.migrations.push({ version: params[0], name: params[1], applied_at: params[2] });
+        } else if (norm.includes('INSERT OR REPLACE INTO attempt_results')) {
+          upsert(tables.attempt_results, 'attempt_id', {
+            attempt_id: params[0], task_id: params[1], agent_config_id: params[2], status: params[3],
+            output: params[4], error: params[5], duration_ms: params[6], cost_usd: params[7], timestamp: params[8],
+          });
+        } else if (norm.includes('INSERT OR REPLACE INTO scored_attempts')) {
+          upsert(tables.scored_attempts, 'attempt_id', {
+            attempt_id: params[0], task_id: params[1], overall_score: params[2], correctness_score: params[3],
+            efficiency_score: params[4], completeness_score: params[5], hard_gates_passed: params[6], timestamp: params[7],
+          });
+        } else if (norm.includes('INSERT OR REPLACE INTO task_runs')) {
+          upsert(tables.task_runs, 'task_id', {
+            task_id: params[0], description: params[1], total_attempts: params[2], successful_attempts: params[3],
+            total_cost_usd: params[4], total_duration_ms: params[5], winner_attempt_id: params[6], timestamp: params[7],
+          });
+        } else if (norm.startsWith('DELETE FROM attempt_results')) {
+          tables.attempt_results = byTimestampDesc(tables.attempt_results).slice(0, 1000);
+        } else if (norm.startsWith('DELETE FROM scored_attempts')) {
+          tables.scored_attempts = byTimestampDesc(tables.scored_attempts).slice(0, 1000);
+        } else if (norm.startsWith('DELETE FROM task_runs')) {
+          tables.task_runs = byTimestampDesc(tables.task_runs).slice(0, 1000);
+        }
+      },
+      get: (...params: any[]) => {
+        if (norm.includes('SELECT version FROM schema_version')) {
+          return tables.schema_version.length ? { version: Math.max(...tables.schema_version.map((r) => r.version)) } : undefined;
+        }
+        if (norm.includes('FROM attempt_results') && norm.includes('COUNT(*)')) return { count: tables.attempt_results.length };
+        if (norm.includes('FROM scored_attempts') && norm.includes('COUNT(*)')) return { count: tables.scored_attempts.length };
+        if (norm.includes('FROM task_runs') && norm.includes('COUNT(*)')) return { count: tables.task_runs.length };
+        return undefined;
+      },
+      all: (...params: any[]) => {
+        if (norm.includes('FROM attempt_results')) {
+          let rows = byTimestampDesc(tables.attempt_results);
+          if (norm.includes('WHERE task_id = ?')) {
+            rows = rows.filter((r) => r.task_id === params[0]);
+            const limit = params[1];
+            return rows.slice(0, limit).map((r) => ({
+              attempt_id: r.attempt_id, status: r.status, duration_ms: r.duration_ms, cost_usd: r.cost_usd, timestamp: r.timestamp,
+            }));
+          }
+          return rows; // SELECT * for export
+        }
+        if (norm.includes('FROM scored_attempts')) {
+          let rows = byTimestampDesc(tables.scored_attempts);
+          if (norm.includes('WHERE task_id = ?')) {
+            rows = rows.filter((r) => r.task_id === params[0]);
+            return rows.slice(0, params[1]).map((r) => ({
+              attempt_id: r.attempt_id, overall_score: r.overall_score, hard_gates_passed: r.hard_gates_passed, timestamp: r.timestamp,
+            }));
+          }
+          if (norm.includes('correctness_score')) {
+            // getScoredAttemptsForRegression
+            return rows.slice(0, params[0]).map((r) => ({
+              attempt_id: r.attempt_id, overall_score: r.overall_score, correctness_score: r.correctness_score,
+              efficiency_score: r.efficiency_score, completeness_score: r.completeness_score,
+              hard_gates_passed: r.hard_gates_passed, timestamp: r.timestamp,
+            }));
+          }
+          return rows; // SELECT * for export
+        }
+        if (norm.includes('FROM task_runs')) {
+          const rows = byTimestampDesc(tables.task_runs);
+          if (norm.includes('LIMIT ?')) {
+            return rows.slice(0, params[0]).map((r) => ({
+              task_id: r.task_id, description: r.description, total_attempts: r.total_attempts,
+              successful_attempts: r.successful_attempts, total_cost_usd: r.total_cost_usd, timestamp: r.timestamp,
+            }));
+          }
+          return rows; // SELECT * for export
+        }
+        return [];
+      },
+    };
   }
 }
