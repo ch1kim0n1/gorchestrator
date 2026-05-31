@@ -29,17 +29,59 @@ interface HealthCheckLike {
 const SENSITIVE_KEYS = /(?:api[_-]?key|token|secret|password|authorization|email|phone|ssn|credit[_-]?card)/i;
 const API_KEY_PATTERN = /\b[A-Za-z0-9_-]{32,}\b/g;
 const EMAIL_PATTERN = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
+// Free-text PII patterns (order matters: card/SSN before generic phone).
+const CREDIT_CARD_PATTERN = /\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b/g;
+const SSN_PATTERN = /\b\d{3}-\d{2}-\d{4}\b/g;
+const PHONE_PATTERN = /(\+\d{1,3}[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}(\s?x\d+)?/g;
+
+const MAX_REDACT_DEPTH = 32;
+
+/**
+ * Redact PII from a free-text string: emails, long secret-like tokens, and
+ * credit-card / SSN / phone numbers. Shared so every egress/log path applies
+ * the same coverage (issue #48).
+ */
+export function redactFreeTextPII(text: string): string {
+  return text
+    .replace(EMAIL_PATTERN, '[REDACTED_EMAIL]')
+    .replace(CREDIT_CARD_PATTERN, '[REDACTED_CARD]')
+    .replace(SSN_PATTERN, '[REDACTED_SSN]')
+    .replace(PHONE_PATTERN, '[REDACTED_PHONE]')
+    .replace(API_KEY_PATTERN, '[REDACTED_SECRET]');
+}
 
 export function redactPII(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(redactPII);
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, nested]) => [
-      key,
-      SENSITIVE_KEYS.test(key) ? '[REDACTED]' : redactPII(nested),
-    ]));
+  return redactPIIInternal(value, 0, new WeakSet<object>());
+}
+
+function redactPIIInternal(value: unknown, depth: number, seen: WeakSet<object>): unknown {
+  // Depth guard: stop recursing into pathologically deep structures.
+  if (depth > MAX_REDACT_DEPTH) return '[REDACTED_MAX_DEPTH]';
+
+  if (Array.isArray(value)) {
+    // Cycle guard.
+    if (seen.has(value)) return '[REDACTED_CIRCULAR]';
+    seen.add(value);
+    const result = value.map(item => redactPIIInternal(item, depth + 1, seen));
+    seen.delete(value);
+    return result;
   }
+
+  if (value && typeof value === 'object') {
+    if (seen.has(value as object)) return '[REDACTED_CIRCULAR]';
+    seen.add(value as object);
+    const result = Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, nested]) => [
+        key,
+        SENSITIVE_KEYS.test(key) ? '[REDACTED]' : redactPIIInternal(nested, depth + 1, seen),
+      ])
+    );
+    seen.delete(value as object);
+    return result;
+  }
+
   if (typeof value === 'string') {
-    return value.replace(EMAIL_PATTERN, '[REDACTED_EMAIL]').replace(API_KEY_PATTERN, '[REDACTED_SECRET]');
+    return redactFreeTextPII(value);
   }
   return value;
 }

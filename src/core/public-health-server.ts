@@ -1,4 +1,5 @@
 import { IncomingMessage, Server as HttpServer, ServerResponse, createServer } from 'http';
+import * as crypto from 'crypto';
 import { getDefaultSecretManager } from './security.js';
 
 export interface HealthCheckResult {
@@ -110,12 +111,32 @@ export class SecureHealthServer {
 
   private authorizeShutdown(header?: string): boolean {
     if (!this.shutdownToken) return false;
-    const token = header?.replace(/^Bearer\s+/i, '');
-    return token === this.shutdownToken;
+    const token = header?.replace(/^Bearer\s+/i, '') ?? '';
+    // Constant-time comparison to avoid a timing side-channel (issue #55).
+    const a = Buffer.from(token);
+    const b = Buffer.from(this.shutdownToken);
+    if (a.length !== b.length) {
+      // Still run a comparison against self to keep timing uniform.
+      crypto.timingSafeEqual(b, b);
+      return false;
+    }
+    return crypto.timingSafeEqual(a, b);
+  }
+
+  /** Evict rate windows whose window has fully elapsed. Bounds the map under
+   *  churn from many distinct source addresses (issue #56). */
+  private sweepWindows(now: number): void {
+    for (const [key, window] of this.windows) {
+      if (now - window.startedAt >= this.windowMs) {
+        this.windows.delete(key);
+      }
+    }
   }
 
   private checkRate(key: string): { allowed: boolean; resetAt: string } {
     const now = Date.now();
+    // Periodic sweep so stale windows from one-off IPs do not accumulate.
+    if (this.windows.size > 1024) this.sweepWindows(now);
     let window = this.windows.get(key);
     if (!window || now - window.startedAt >= this.windowMs) {
       window = { count: 0, startedAt: now };

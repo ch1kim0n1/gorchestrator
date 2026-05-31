@@ -1,3 +1,4 @@
+import * as crypto from 'crypto';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
@@ -61,17 +62,40 @@ class GOrchestratorMCPServer {
     this.orchestrator = new GOrchestrator();
 
     const env = typeof process !== 'undefined' ? process.env : {};
+    const isProduction = env.NODE_ENV === 'production';
     const secrets = getDefaultSecretManager();
-    this.requireAuth = env.GORCHESTRATOR_REQUIRE_AUTH === 'true';
-    this.allowAnonymousRead = env.GORCHESTRATOR_ALLOW_ANONYMOUS_READ !== 'false';
+    // Secure by default: require auth unless explicitly opted out via env.
+    this.requireAuth = env.GORCHESTRATOR_REQUIRE_AUTH !== 'false';
+    // Anonymous read is OFF by default; must be explicitly enabled.
+    this.allowAnonymousRead = env.GORCHESTRATOR_ALLOW_ANONYMOUS_READ === 'true';
     this.defaultScopes = this.parseScopes(env.GORCHESTRATOR_MCP_DEFAULT_SCOPES || 'read,write');
     this.bootstrapToken = secrets.get('gorchestrator_mcp_token');
     this.bootstrapScopes = this.parseScopes(env.GORCHESTRATOR_MCP_TOKEN_SCOPES || 'read,write');
     this.permissions = PermissionModel.loadDefault();
     this.securityAudit = new LocalAuditLogger('gorchestrator');
 
+    // No hardcoded secret fallback. In production a real secret is mandatory.
+    const configuredSecret = authConfig?.secret || secrets.get('gorchestrator_auth_secret');
+    if (!configuredSecret) {
+      if (isProduction) {
+        throw new Error(
+          'GOrchestrator MCP server refuses to start in production without an auth secret. ' +
+          'Set the "gorchestrator_auth_secret" secret (no default fallback is permitted).'
+        );
+      }
+      // Outside production, generate an ephemeral random secret so tokens cannot
+      // be forged with a publicly-known key. It changes per process.
+      this.securityAudit.logDecision?.({
+        operation: 'mcp_auth_secret',
+        decision: 'ephemeral_dev_secret',
+        success: true,
+        metadata: { reason: 'no_configured_secret_non_production' },
+      });
+    }
+    const effectiveSecret = configuredSecret || crypto.randomBytes(32).toString('hex');
+
     this.authMiddleware = createAuthMiddleware(authConfig || {
-      secret: secrets.get('gorchestrator_auth_secret') || 'dev-secret-key',
+      secret: effectiveSecret,
       tool: 'gorchestrator',
       defaultRoles: this.defaultScopes,
     });
@@ -115,6 +139,15 @@ class GOrchestratorMCPServer {
                   type: 'boolean',
                   description: 'Enable GToM cognitive check (default: false)',
                   default: false,
+                },
+                budget: {
+                  type: 'object',
+                  description: 'Per-task budget; enforced by the cost hard gate',
+                  properties: {
+                    max_cost_usd: { type: 'number', description: 'Maximum total cost in USD' },
+                    max_latency_ms: { type: 'number', description: 'Maximum latency in ms' },
+                    max_wall_time_ms: { type: 'number', description: 'Maximum wall time in ms' },
+                  },
                 },
               },
               required: ['task'],
@@ -328,11 +361,26 @@ class GOrchestratorMCPServer {
     return { ok: true as const, token };
   }
 
+  /** Drop expired issued tokens and stale rate windows so these maps stay
+   *  bounded under token churn (issue #56). */
+  private evictStale(now: number): void {
+    for (const [key, issued] of this.issuedTokens) {
+      if (issued.expiresAt < now) this.issuedTokens.delete(key);
+    }
+    const hourMs = 60 * 60 * 1000;
+    for (const [key, window] of this.rateWindows) {
+      // A window is stale once both its minute and hour buckets have elapsed.
+      if (now - window.hourStart >= hourMs) this.rateWindows.delete(key);
+    }
+  }
+
   private scopesForToken(token: string, fallbackRoles: string[]): McpScope[] {
     const issued = this.issuedTokens.get(token);
     if (issued && issued.expiresAt >= Date.now()) {
       return issued.scopes;
     }
+    // Token present but expired: evict it.
+    if (issued) this.issuedTokens.delete(token);
     if (this.bootstrapToken && token === this.bootstrapToken) {
       return this.bootstrapScopes;
     }
@@ -352,6 +400,8 @@ class GOrchestratorMCPServer {
     const now = Date.now();
     const minuteMs = 60 * 1000;
     const hourMs = 60 * 60 * 1000;
+    // Periodic sweep to bound the maps under churn.
+    if (this.rateWindows.size + this.issuedTokens.size > 1024) this.evictStale(now);
     let window = this.rateWindows.get(token);
     if (!window) {
       window = { minuteCount: 0, minuteStart: now, hourCount: 0, hourStart: now };
@@ -409,6 +459,14 @@ class GOrchestratorMCPServer {
     taskType: z.string().optional(),
     verify: z.boolean().optional(),
     cognitiveCheck: z.boolean().optional(),
+    // Caller-supplied per-task budget; enforced by the cost hard gate (issue #63).
+    budget: z
+      .object({
+        max_cost_usd: z.number().positive().optional(),
+        max_latency_ms: z.number().int().positive().optional(),
+        max_wall_time_ms: z.number().int().positive().optional(),
+      })
+      .optional(),
   });
 
   private static readonly ConfigSampleArgsSchema = z.object({
@@ -432,13 +490,7 @@ class GOrchestratorMCPServer {
     limit: z.number().int().positive().max(1000).optional(),
   });
 
-  private async handleRun(args: {
-    task: string;
-    n?: number;
-    taskType?: string;
-    verify?: boolean;
-    cognitiveCheck?: boolean;
-  }) {
+  private async handleRun(args: unknown) {
     const parsed = GOrchestratorMCPServer.RunArgsSchema.safeParse(args);
     if (!parsed.success) {
       return this.errorResponse(`Invalid request: ${JSON.stringify(parsed.error.flatten())}`);
@@ -449,6 +501,7 @@ class GOrchestratorMCPServer {
       n: parsed.data.n || 5,
       verify: parsed.data.verify !== false,
       cognitiveCheck: parsed.data.cognitiveCheck || false,
+      budget: parsed.data.budget,
     });
 
     return {

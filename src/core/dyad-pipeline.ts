@@ -8,6 +8,7 @@ import {
   ScoreResponse,
 } from '../types/index.js';
 import { DetectorPool } from './detector-pool.js';
+import { redactFreeTextPII } from './observability.js';
 
 export class DyadPipeline {
   constructor(private readonly config: {
@@ -18,8 +19,25 @@ export class DyadPipeline {
     logger?: { warn: (message: string, context?: Record<string, unknown>) => void };
   }) {}
 
-  async run(task: RelationshipAnalysisTask): Promise<DyadPipelineResult> {
-    const parsed = RelationshipAnalysisTaskSchema.parse(task);
+  /**
+   * Redact PII from message text BEFORE any egress (GToM/GMirror/LLM) or logging.
+   * Free-text phone/SSN/CC/email are stripped so raw relationship content never
+   * leaves the process (issue #48).
+   */
+  private redactTask(task: RelationshipAnalysisTask): RelationshipAnalysisTask {
+    return {
+      ...task,
+      message_window: task.message_window.map(message => ({
+        ...message,
+        text: redactFreeTextPII(message.text),
+      })),
+    };
+  }
+
+  async run(rawTask: RelationshipAnalysisTask): Promise<DyadPipelineResult> {
+    const validated = RelationshipAnalysisTaskSchema.parse(rawTask);
+    // Redact PII once, up front; every downstream egress uses the redacted task.
+    const parsed = this.redactTask(validated);
     const start = performance.now();
     const relationalRisk = await this.checkRelationalConflicts(parsed);
 
