@@ -16,7 +16,7 @@ GOrchestrator coordinates multi-tool task execution with multi-model consensus (
 - Circuit-breaker on GBrain client (60s timeout)
 - DriftDetector, CostLedger, LatencyTracker, AuditLogger, StructuredLogger (all wired)
 - SQLite persistence with schema_version + migrations
-- CLI commands: `eval`, `replay`, `regress` (stub), `trend` (stub), `drift`, `cost`
+- CLI commands: `replay`, `regress`, `trend`, `drift`, `cost` (implemented). Stubs (return "not implemented in MVP"): `eval`, `attempts`, `sandbox-stats`.
 
 ## API Contract (current)
 
@@ -41,9 +41,9 @@ interface TaskResult {
 ### Multi-Model Configuration
 ```typescript
 interface MultiModelConfig {
-  tier1_model: string;           // default: claude-haiku-4-5
+  tier1_model: string;           // pricing-table default: claude-haiku-4-5-20251001 (alias 'claude-haiku-4-5' also priced)
   tier2_model: string;           // default: claude-sonnet-4-6
-  tier3_model?: string;          // default: claude-opus-4-6
+  tier3_model?: string;          // default: claude-opus-4-7 (claude-opus-4-6 also priced)
   consensus_threshold: number;   // default: 0.8
   max_escalations: number;
   allow_tier3: boolean;          // currently true
@@ -73,7 +73,7 @@ Add a `RelationshipAnalysisTask` type alongside the existing developer-task pipe
 interface RelationshipAnalysisTask {
   task_type: 'relationship_analysis';
   dyad_id: string;
-  message_window: RawMessage[];  // PII-redacted before this point (GAgent)
+  message_window: RawMessage[];  // GAgent SHOULD pre-redact; the DyadPipeline ALSO redacts free-text PII (phone/SSN/CC/email) before any egress to GToM/GMirror/LLM as defense-in-depth.
   detectors: DetectorName[];
   time_range: { start: string; end: string };
   budget: { max_cost_usd: number; max_latency_ms: number };
@@ -143,8 +143,8 @@ if (task.task_type === 'relationship_analysis') {
 
 **File to modify:** `src/core/orchestrator.ts`
 
-### 5. Implement `regress` and `trend` CLI Commands (currently stubs)
-Both commands print "not implemented in MVP". For DYAD these are important for monitoring relationship analysis quality over time:
+### 5. `regress` and `trend` CLI Commands (IMPLEMENTED)
+NOTE: `regress` and `trend` are now fully implemented (`src/commands/regress.ts`, `src/commands/trend.ts`, wired in `src/cli.ts`). The remaining stubs that still print "not implemented in MVP" are `eval`, `attempts`, and `sandbox-stats`. The design notes below are retained for historical context:
 
 **`regress`** — compare current detector accuracy against the locked baseline receipt:
 ```typescript
@@ -201,12 +201,14 @@ this.driftDetector.record('task_success_rate', rate);
 - **GStack:** `http://localhost:3001`
 
 ## CLI Commands
-All 6 commands present. `regress` and `trend` are currently stubs — see section 5 above.
+`replay`, `regress`, `trend`, `drift`, `cost` are implemented. `eval`, `attempts`, and `sandbox-stats` are stubs that print "not implemented in MVP".
 
 ## Persistence
-- SQLite: `~/.gorchestrator/gorchestrator.db` (via `OrchestratorPersistenceManager`, REQUIRED)
+- SQLite: `~/.gorchestrator/gorchestrator.db` (via `OrchestratorPersistenceManager`, REQUIRED — construction throws if the SQLite engine cannot initialize). This requires the native `better-sqlite3` binding to be built for the host.
 - Schema: `attempt_results`, `scored_attempts`, `task_runs`, `schema_version`
 - Receipts: JSONL per ISO week
+- Success-rate history: best-effort JSON at `~/.gorchestrator/...` (now written after each task; serialized via an async write lock).
+- `src/db.ts` is a separate, best-effort JSONL run log (`runs.jsonl`) whose write errors are intentionally swallowed; it is NOT the authoritative store.
 
 ## Integration Points
 - **Called by:** GStack (top-level orchestration), DYAD (relationship analysis pipeline)

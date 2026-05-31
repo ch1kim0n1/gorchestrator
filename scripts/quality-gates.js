@@ -62,6 +62,34 @@ function checkPackageContract() {
   if (!exists('scripts/eval-tools.js')) fail('missing scripts/eval-tools.js');
   if (!exists('jest.config.js')) fail('missing jest.config.js');
   if (!exists('tsconfig.json')) fail('missing tsconfig.json');
+
+  // A LICENSE file must exist because package.json claims a license and lists
+  // LICENSE in "files" (issue #43).
+  if (!exists('LICENSE')) fail('missing LICENSE file (declared in package.json "files")');
+
+  // prepublish build hook so the tarball ships compiled dist/ (issue #43).
+  if (!pkg.scripts || (!pkg.scripts.prepublishOnly && !pkg.scripts.prepare)) {
+    fail('package.json missing prepublishOnly/prepare build hook');
+  }
+
+  // Validate that every entry point resolves on disk AFTER a build (issue #44).
+  // Only enforced once dist/ exists, so the gate is meaningful post-build but
+  // does not spuriously fail on a clean checkout.
+  if (fs.existsSync(path.join(root, 'dist'))) {
+    const entryPoints = new Set();
+    const addEntry = (p) => { if (typeof p === 'string' && p.startsWith('./dist')) entryPoints.add(p); };
+    addEntry(pkg.main);
+    addEntry(pkg.types);
+    for (const target of Object.values(pkg.bin || {})) addEntry(target);
+    const collectExports = (node) => {
+      if (typeof node === 'string') { addEntry(node); return; }
+      if (node && typeof node === 'object') for (const v of Object.values(node)) collectExports(v);
+    };
+    collectExports(pkg.exports || {});
+    for (const entry of entryPoints) {
+      if (!exists(entry)) fail(`entry point does not exist after build: ${entry}`);
+    }
+  }
   ok('package contract');
 }
 

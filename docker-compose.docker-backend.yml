@@ -1,0 +1,17 @@
+# Opt-in override that enables the Docker sandbox backend for gorchestrator.
+#
+# !!! SECURITY WARNING !!!
+# This mounts the host Docker socket into the gorchestrator container. That
+# grants the container full control of the host Docker daemon, which is
+# equivalent to host root and enables container escape. Only use this on a
+# trusted, isolated host (or replace the bind mount with a hardened
+# docker-socket-proxy that restricts the allowed API surface).
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.docker-backend.yml up
+services:
+  gorchestrator:
+    environment:
+      - SANDBOX_BACKEND=docker
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

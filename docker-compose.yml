@@ -18,7 +18,12 @@ services:
       - SANDBOX_BACKEND=inprocess
     volumes:
       - gorchestrator-data:/app/data
-      - /var/run/docker.sock:/var/run/docker.sock  # only needed for SANDBOX_BACKEND=docker
+      # NOTE: the host Docker socket is intentionally NOT mounted by default.
+      # Mounting /var/run/docker.sock grants the container full control of the
+      # host Docker daemon (equivalent to host root / trivial container escape).
+      # It is only required for SANDBOX_BACKEND=docker. To opt in explicitly,
+      # use the docker-backend override: `docker compose -f docker-compose.yml -f
+      # docker-compose.docker-backend.yml up` (see that file for the warning).
     depends_on:
       gbrain:
         condition: service_healthy
@@ -27,7 +32,14 @@ services:
       gtom:
         condition: service_healthy
     healthcheck:
-      test: ['CMD', 'curl', '-f', 'http://localhost:8080/health/live']
+      # curl/wget are absent in node:20-alpine; use a node probe. Honors HEALTH_PORT/GORCHESTRATOR_PORT.
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "const p=process.env.HEALTH_PORT||process.env.GORCHESTRATOR_PORT||8080;require('http').get('http://localhost:'+p+'/health/live',(r)=>{process.exit(r.statusCode===200?0:1)}).on('error',()=>process.exit(1))",
+        ]
       interval: 30s
       timeout: 10s
       retries: 3

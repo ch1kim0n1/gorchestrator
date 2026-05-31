@@ -1,12 +1,26 @@
 name: CI
 on: [push, pull_request]
 jobs:
-  test:
+  build-and-verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: '20', cache: 'npm' }
-      - run: npm ci
+      # --ignore-scripts so the `prepare` build hook does not run before we
+      # explicitly build below (and so native postinstalls do not block CI).
+      - run: npm ci --ignore-scripts
+      # Typecheck must pass (no emit) — catches compile/typecheck regressions.
+      - run: npm run typecheck
+      # Lint.
+      - run: npm run lint
+      # Build emits dist/ (tsc has noEmitOnError, so this fails on any error).
       - run: npm run build
+      # Quality gates: package contract (incl. entry-point + LICENSE checks),
+      # docs, privacy/PII scan, test isolation, MCP contract.
+      - run: npm run check:all
+      # Packaging check: ensure the tarball would contain dist/ + LICENSE and
+      # that entry points resolve.
+      - run: npm pack --dry-run
+      # Tests with coverage.
       - run: npm test -- --coverage
